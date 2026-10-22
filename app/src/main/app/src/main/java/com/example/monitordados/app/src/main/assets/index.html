@@ -1,1 +1,648 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Monitor de Dados Móveis</title>
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --card: #151f32;
+      --card-dark: #0f172a;
+      --border: #263554;
+      --primary: #38bdf8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 12px; padding-bottom: 40px; }
 
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
+    .header h1 { font-size: 1.1rem; color: var(--primary); }
+    .header-sub { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+    .badge-rede { background: rgba(34,197,94,0.18); color: var(--success); border: 1px solid var(--success); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+    .badge-rede.off { background: rgba(239,68,68,0.22); color: #f87171; border-color: var(--danger); }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+    .card-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+    .consumo-valor { font-size: 2rem; font-weight: 800; margin: 4px 0; }
+    .sub-info { font-size: 0.82rem; color: var(--muted); line-height: 1.4; }
+
+    .progress-bar { width: 100%; height: 11px; background: var(--card-dark); border-radius: 999px; overflow: hidden; margin: 10px 0; border: 1px solid var(--border); }
+    .progress-fill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--primary), var(--success)); transition: width 0.4s ease; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric-box { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .metric-label { font-size: 0.72rem; color: var(--muted); }
+    .metric-val { font-size: 1rem; font-weight: 700; margin-top: 3px; color: var(--text); }
+
+    select, input, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-dark); color: var(--text); font-size: 0.88rem; margin-top: 6px; }
+    button { background: var(--primary); color: #082f49; font-weight: 700; border: none; cursor: pointer; }
+    button.btn-sec { background: #1e293b; color: var(--text); border: 1px solid var(--border); }
+    button.btn-warn { background: rgba(245,158,11,0.2); color: var(--warning); border: 1px solid var(--warning); }
+
+    .filtros-apps { display: flex; gap: 6px; margin-bottom: 10px; overflow-x: auto; }
+    .filtro-btn { width: auto; padding: 6px 12px; font-size: 0.75rem; border-radius: 999px; background: var(--card-dark); color: var(--muted); border: 1px solid var(--border); margin-top: 0; white-space: nowrap; }
+    .filtro-btn.ativo { background: var(--primary); color: #082f49; border-color: var(--primary); }
+
+    .app-list { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; }
+    .app-item { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .app-item.app-bloqueado { border-color: var(--danger); background: rgba(239,68,68,0.08); }
+    .app-main { flex: 1; min-width: 0; }
+    .app-nome { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .app-pkg { font-size: 0.7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .app-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+    .tag { font-size: 0.68rem; padding: 2px 7px; border-radius: 6px; font-weight: 600; display: inline-block; }
+    .tag-net-on { background: rgba(34,197,94,0.2); color: #4ade80; }
+    .tag-net-idle { background: rgba(56,189,248,0.15); color: #38bdf8; }
+    .tag-net-block { background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid var(--danger); }
+    .tag-geo-on { background: rgba(245,158,11,0.2); color: #fbbf24; }
+    .tag-geo-off { background: rgba(148,163,184,0.15); color: #94a3b8; }
+    .app-consumo { text-align: right; font-weight: 800; font-size: 0.92rem; color: var(--primary); white-space: nowrap; }
+    .alerta-box { display: none; padding: 10px; border-radius: 10px; margin-bottom: 12px; font-size: 0.85rem; font-weight: 600; }
+
+    .banner-firewall {
+      display: none;
+      background: rgba(239, 68, 68, 0.18);
+      border: 1px solid var(--danger);
+      color: #f87171;
+      padding: 12px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+      font-size: 0.84rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <h1>📊 Monitor de Dados</h1>
+      <div class="header-sub" id="statusNuvemTopo">☁️ Conectando aparelho...</div>
+    </div>
+    <span id="badgeRedeTopo" class="badge-rede">🟢 4G/5G Ativo</span>
+  </div>
+
+  <div id="bannerFirewall" class="banner-firewall">
+    <strong>🛡️ Firewall da Central Ativo:</strong>
+    <span id="textoBannerFirewall">O acesso à internet dos aplicativos foi bloqueado remotamente pela Central.</span>
+  </div>
+
+  <div id="boxPermissao" class="card" style="display:none; border-color: var(--warning);">
+    <div class="card-title" style="color: var(--warning);">⚠️ Permissões do Sistema</div>
+    <p class="sub-info" style="margin-bottom: 8px;">Ative o Acesso ao Uso e a Chave de Firewall para leitura e controle remoto completo.</p>
+    <button id="btnPermUso" class="btn-warn" onclick="abrirPermissaoUso()">1. Liberar Acesso ao Uso no Android</button>
+    <button id="btnPermVpn" class="btn-sec" onclick="abrirPermissaoVpn()" style="margin-top:6px;">2. Autorizar Chave de Firewall (VPN)</button>
+  </div>
+
+  <div id="alertaFranquia" class="alerta-box"></div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>Consumo no Ciclo Atual</span>
+      <span id="labelPlanoAtivo">♾️ Plano Ilimitado</span>
+    </div>
+    <div class="consumo-valor" id="valorConsumoGB">0.00 GB</div>
+    <div class="sub-info" id="textoStatusFranquia">Modo Ilimitado ativo — Uso livre sem bloqueio</div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="barraProgresso"></div>
+    </div>
+
+    <div class="grid-2" style="margin-top: 10px;">
+      <div class="metric-box">
+        <div class="metric-label">Velocidade Real</div>
+        <div class="metric-val" id="valVelocidade">0.00 Mbps</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-label">Latência (Ping)</div>
+        <div class="metric-val" id="valLatencia">-- ms</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>📍 Rede Ativa e Geolocalização</span>
+      <button class="filtro-btn" onclick="atualizarGeolocalizacaoRede()">Atualizar GPS/IP</button>
+    </div>
+    <div class="grid-2">
+      <div class="metric-box">
+        <div class="metric-label">Rede em Funcionamento</div>
+        <div class="metric-val" id="geoRedeAtiva" style="font-size:0.9rem;">Detectando...</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-label">Localização / Cidade</div>
+        <div class="metric-val" id="geoCidade" style="font-size:0.9rem;">Localizando...</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-label">Coordenadas GPS</div>
+        <div class="metric-val" id="geoCoordenadas" style="font-size:0.82rem;">Aguardando GPS...</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-label">Operadora / Provedor</div>
+        <div class="metric-val" id="geoOperadora" style="font-size:0.82rem;">--</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>📱 Apps Instalados (Rede & GPS)</span>
+      <span id="contadorApps">0 apps</span>
+    </div>
+
+    <div class="filtros-apps">
+      <button class="filtro-btn ativo" id="f-todos" onclick="definirFiltroApps('todos')">Todos</button>
+      <button class="filtro-btn" id="f-geo" onclick="definirFiltroApps('geo')">📍 Com GPS</button>
+      <button class="filtro-btn" id="f-rede" onclick="definirFiltroApps('rede')">🟢 Em Tráfego</button>
+      <button class="filtro-btn" id="f-bloq" onclick="definirFiltroApps('bloq')">🚫 Bloqueados</button>
+    </div>
+
+    <div class="app-list" id="listaAppsContainer">
+      <div class="sub-info">Carregando aplicativos instalados...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">⚙️ Configurar Plano e Ciclo</div>
+    <label class="metric-label">Franquia do Plano:</label>
+    <select id="selectPlano" onchange="salvarConfiguracoes()">
+      <option value="0">♾️ Plano Ilimitado (Uso Livre)</option>
+      <option value="43">43 GB</option>
+      <option value="48">48 GB</option>
+      <option value="91">91 GB</option>
+      <option value="134">134 GB</option>
+      <option value="20">20 GB</option>
+      <option value="50">50 GB</option>
+      <option value="100">100 GB</option>
+    </select>
+
+    <div class="grid-2" style="margin-top: 8px;">
+      <div>
+        <label class="metric-label">Dia de Renovação:</label>
+        <input type="number" id="inputDiaCiclo" min="1" max="28" value="1" onchange="salvarConfiguracoes()" />
+      </div>
+      <div style="display:flex; align-items:flex-end;">
+        <button class="btn-sec" onclick="zerarContadorManual()">Zerar Contador Hoje</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var memoriaSegura = {};
+    function lerDado(chave, padrao) {
+      try {
+        var val = window.localStorage.getItem(chave);
+        return val !== null ? val : padrao;
+      } catch (e) {
+        return memoriaSegura[chave] !== undefined ? memoriaSegura[chave] : padrao;
+      }
+    }
+    function salvarDado(chave, valor) {
+      memoriaSegura[chave] = String(valor);
+      try {
+        window.localStorage.setItem(chave, String(valor));
+      } catch (e) {}
+    }
+
+    var PREFIXO_MQTT = 'frota_josimar_2026_v6/aparelhos/';
+    var PREFIXO_CMD = 'frota_josimar_2026_v6/comandos/';
+    var clientMqtt = null;
+
+    var planoGB = parseFloat(lerDado('planoGB', '0')) || 0;
+    var diaCiclo = parseInt(lerDado('diaCiclo', '1'), 10) || 1;
+    var offsetZeroGB = parseFloat(lerDado('offsetZeroGB', '0')) || 0;
+
+    var firewallGeralAtivo = lerDado('firewallGeral_v7', 'false') === 'true';
+    var appsBloqueadosMap = {};
+    try {
+      appsBloqueadosMap = JSON.parse(lerDado('appsBloqueados_v7', '{}')) || {};
+    } catch (e) {
+      appsBloqueadosMap = {};
+    }
+
+    var ultimoConsumoBrutoGB = 0;
+    var filtroAtualApps = 'todos';
+    var cacheApps = [];
+
+    var estadoLocal = {
+      rede: '4G/5G Móvel',
+      velocidade: 24.8,
+      latencia: 22,
+      cidade: 'Caucaia - CE',
+      operadora: 'Rede Móvel',
+      lat: -3.7361,
+      lon: -38.6531
+    };
+
+    var deviceId = lerDado('deviceId_v6', '');
+    if (!deviceId) {
+      deviceId = 'CEL-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+      salvarDado('deviceId_v6', deviceId);
+    }
+
+    function detectarModeloAparelho() {
+      var salvo = lerDado('nomeAparelho_v6', '');
+      if (salvo) return salvo;
+      var ua = navigator.userAgent || '';
+      var modelo = 'Android';
+      var matchAndroid = ua.match(/;\s*([^;)]+)\s+Build\//i);
+      if (matchAndroid && matchAndroid[1]) {
+        modelo = matchAndroid[1].trim();
+      } else if (/iPhone/i.test(ua)) {
+        modelo = 'iPhone';
+      } else if (/Windows|Macintosh/i.test(ua)) {
+        modelo = 'PC/Web';
+      }
+      var nomeGerado = modelo + ' • ' + deviceId;
+      salvarDado('nomeAparelho_v6', nomeGerado);
+      return nomeGerado;
+    }
+
+    var nomeAparelho = detectarModeloAparelho();
+    document.getElementById('statusNuvemTopo').textContent = '☁️ ID: ' + deviceId + ' (Sincronizando...)';
+
+    document.getElementById('selectPlano').value = String(planoGB);
+    document.getElementById('inputDiaCiclo').value = String(diaCiclo);
+
+    function temPonteAndroid() {
+      return typeof window.AndroidMonitor !== 'undefined';
+    }
+
+    function abrirPermissaoUso() {
+      if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoUso) {
+        window.AndroidMonitor.solicitarPermissaoUso();
+      }
+    }
+
+    function abrirPermissaoVpn() {
+      if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoVpn) {
+        window.AndroidMonitor.solicitarPermissaoVpn();
+      }
+    }
+
+    function appEstaBloqueado(pacote) {
+      if (firewallGeralAtivo) return true;
+      return Boolean(appsBloqueadosMap[pacote]);
+    }
+
+    function atualizarInterfaceFirewall() {
+      var banner = document.getElementById('bannerFirewall');
+      var txtBanner = document.getElementById('textoBannerFirewall');
+      var badgeTopo = document.getElementById('badgeRedeTopo');
+
+      var pacotesBloq = Object.keys(appsBloqueadosMap).filter(function(k) { return appsBloqueadosMap[k]; });
+
+      // Aciona a VPN Nativa do Android no APK instalado para cortar a internet real dos apps bloqueados
+      if (temPonteAndroid() && window.AndroidMonitor.sincronizarFirewallVpn) {
+        try {
+          window.AndroidMonitor.sincronizarFirewallVpn(firewallGeralAtivo, JSON.stringify(pacotesBloq));
+        } catch (e) {}
+      }
+
+      if (firewallGeralAtivo) {
+        banner.style.display = 'block';
+        txtBanner.textContent = 'Todos os aplicativos deste aparelho estão com acesso à internet bloqueado pela Central.';
+        badgeTopo.textContent = '🛡️ Apps Bloqueados';
+        badgeTopo.classList.add('off');
+      } else if (pacotesBloq.length > 0) {
+        banner.style.display = 'block';
+        txtBanner.textContent = pacotesBloq.length + ' aplicativo(s) com acesso à internet bloqueado pela Central.';
+        badgeTopo.classList.remove('off');
+      } else {
+        banner.style.display = 'none';
+        badgeTopo.classList.remove('off');
+      }
+
+      atualizarPainelLocal();
+      renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+      enviarPacoteAutomatico();
+    }
+
+    function salvarConfiguracoes() {
+      planoGB = parseFloat(document.getElementById('selectPlano').value) || 0;
+      diaCiclo = parseInt(document.getElementById('inputDiaCiclo').value || '1', 10) || 1;
+      salvarDado('planoGB', planoGB);
+      salvarDado('diaCiclo', diaCiclo);
+      atualizarPainelLocal();
+      carregarAppsInstalados();
+      enviarPacoteAutomatico();
+    }
+
+    function zerarContadorManual() {
+      offsetZeroGB = ultimoConsumoBrutoGB;
+      salvarDado('offsetZeroGB', offsetZeroGB);
+      atualizarPainelLocal();
+      enviarPacoteAutomatico();
+    }
+
+    function atualizarPainelLocal() {
+      if (temPonteAndroid()) {
+        try {
+          var permitidoUso = window.AndroidMonitor.temPermissaoUso();
+          var permitidoVpn = window.AndroidMonitor.temPermissaoVpn ? window.AndroidMonitor.temPermissaoVpn() : true;
+          document.getElementById('boxPermissao').style.display = (permitidoUso && permitidoVpn) ? 'none' : 'block';
+          document.getElementById('btnPermUso').style.display = permitidoUso ? 'none' : 'block';
+          document.getElementById('btnPermVpn').style.display = permitidoVpn ? 'none' : 'block';
+
+          ultimoConsumoBrutoGB = window.AndroidMonitor.obterConsumoTotalMesGB(diaCiclo) || 0;
+          estadoLocal.rede = window.AndroidMonitor.obterTipoRede() || 'Dados Móveis';
+          estadoLocal.velocidade = window.AndroidMonitor.obterVelocidadeMbps() || 0;
+          estadoLocal.latencia = window.AndroidMonitor.obterLatenciaMs() || 0;
+          window.AndroidMonitor.dispararMedicaoEmSegundoPlano();
+        } catch (e) {}
+      } else {
+        var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (conn && conn.effectiveType) {
+          estadoLocal.rede = conn.effectiveType.toUpperCase() + ' Ativo';
+          if (conn.downlink) estadoLocal.velocidade = conn.downlink;
+          if (conn.rtt) estadoLocal.latencia = conn.rtt;
+        }
+        if (ultimoConsumoBrutoGB === 0) {
+          var randInicial = (Math.random() * 8 + 2.1).toFixed(2);
+          ultimoConsumoBrutoGB = parseFloat(lerDado('simConsumoGB_v6', randInicial)) || 4.25;
+          salvarDado('simConsumoGB_v6', ultimoConsumoBrutoGB);
+        }
+      }
+
+      var consumoLiquido = Math.max(0, ultimoConsumoBrutoGB - offsetZeroGB);
+      var redeMostrada = firewallGeralAtivo ? '🛡️ Firewall Ativo (Apps Bloqueados)' : estadoLocal.rede;
+      var velMostrada = firewallGeralAtivo ? 0 : Number(estadoLocal.velocidade);
+
+      if (!firewallGeralAtivo) {
+        document.getElementById('badgeRedeTopo').textContent = '🟢 ' + estadoLocal.rede;
+      }
+      document.getElementById('geoRedeAtiva').textContent = redeMostrada;
+      document.getElementById('valorConsumoGB').textContent = consumoLiquido.toFixed(2) + ' GB';
+      document.getElementById('valVelocidade').textContent = velMostrada.toFixed(2) + ' Mbps';
+      document.getElementById('valLatencia').textContent = firewallGeralAtivo ? 'Bloqueado' : ((estadoLocal.latencia > 0 ? estadoLocal.latencia : 22) + ' ms');
+
+      var barra = document.getElementById('barraProgresso');
+      var alerta = document.getElementById('alertaFranquia');
+
+      if (planoGB === 0) {
+        document.getElementById('labelPlanoAtivo').textContent = '♾️ Plano Ilimitado';
+        document.getElementById('textoStatusFranquia').textContent = 'Uso Livre Ilimitado • Renovação dia ' + diaCiclo;
+        barra.style.width = '100%';
+        alerta.style.display = 'none';
+      } else {
+        var pct = Math.min(100, (consumoLiquido / planoGB) * 100);
+        var restante = Math.max(0, planoGB - consumoLiquido);
+        document.getElementById('labelPlanoAtivo').textContent = 'Franquia ' + planoGB + ' GB';
+        document.getElementById('textoStatusFranquia').textContent = pct.toFixed(1) + '% usado • Restam ' + restante.toFixed(2) + ' GB (Dia ' + diaCiclo + ')';
+        barra.style.width = pct + '%';
+
+        if (pct >= 90) {
+          alerta.style.display = 'block';
+          alerta.style.background = 'rgba(239,68,68,0.2)';
+          alerta.style.color = '#f87171';
+          alerta.textContent = '🚨 Atenção: Você atingiu ' + pct.toFixed(1) + '% da sua franquia de ' + planoGB + ' GB!';
+        } else if (pct >= 80) {
+          alerta.style.display = 'block';
+          alerta.style.background = 'rgba(245,158,11,0.2)';
+          alerta.style.color = '#fbbf24';
+          alerta.textContent = '⚠️ Alerta: Consumo acima de 80% do plano (' + consumoLiquido.toFixed(2) + ' GB).';
+        } else {
+          alerta.style.display = 'none';
+        }
+      }
+    }
+
+    function atualizarGeolocalizacaoRede() {
+      document.getElementById('geoCidade').textContent = estadoLocal.cidade;
+      document.getElementById('geoOperadora').textContent = estadoLocal.operadora;
+      document.getElementById('geoCoordenadas').textContent = estadoLocal.lat.toFixed(4) + ', ' + estadoLocal.lon.toFixed(4);
+
+      if (temPonteAndroid() && window.AndroidMonitor.obterInfoRedeEGeoJSON) {
+        try {
+          var info = JSON.parse(window.AndroidMonitor.obterInfoRedeEGeoJSON());
+          if (info.operadora) {
+            estadoLocal.operadora = info.operadora;
+            document.getElementById('geoOperadora').textContent = info.operadora;
+          }
+          if (info.latitude && info.longitude && (info.latitude !== 0 || info.longitude !== 0)) {
+            estadoLocal.lat = info.latitude;
+            estadoLocal.lon = info.longitude;
+            document.getElementById('geoCoordenadas').textContent = info.latitude.toFixed(4) + ', ' + info.longitude.toFixed(4);
+          }
+        } catch (e) {}
+      }
+
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function(pos) {
+          estadoLocal.lat = pos.coords.latitude;
+          estadoLocal.lon = pos.coords.longitude;
+          document.getElementById('geoCoordenadas').textContent = pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4);
+          enviarPacoteAutomatico();
+        }, function() {}, { timeout: 6000 });
+      }
+
+      fetch('https://ipapi.co/json/')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d && d.city) {
+            estadoLocal.cidade = d.city + ' - ' + (d.region_code || '');
+            document.getElementById('geoCidade').textContent = estadoLocal.cidade;
+            if (d.org) {
+              estadoLocal.operadora = d.org;
+              document.getElementById('geoOperadora').textContent = d.org;
+            }
+            if (d.latitude && d.longitude) {
+              estadoLocal.lat = d.latitude;
+              estadoLocal.lon = d.longitude;
+              document.getElementById('geoCoordenadas').textContent = d.latitude.toFixed(4) + ', ' + d.longitude.toFixed(4);
+            }
+            enviarPacoteAutomatico();
+          }
+        })
+        .catch(function() {});
+    }
+
+    function carregarAppsInstalados() {
+      if (temPonteAndroid() && window.AndroidMonitor.obterAppsInstaladosJSON) {
+        try {
+          var raw = window.AndroidMonitor.obterAppsInstaladosJSON(diaCiclo);
+          cacheApps = JSON.parse(raw || '[]');
+        } catch (e) {
+          cacheApps = [];
+        }
+      }
+      if (!cacheApps || cacheApps.length === 0) {
+        cacheApps = [
+          { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 840.5, redeAtiva: 'Transmitindo (' + estadoLocal.rede + ')', emTransmissao: true, usaGeo: true, geoAtiva: true },
+          { nome: 'Instagram', pacote: 'com.instagram.android', totalMB: 1250.2, redeAtiva: 'Transmitindo (' + estadoLocal.rede + ')', emTransmissao: true, usaGeo: true, geoAtiva: true },
+          { nome: 'Google Maps', pacote: 'com.google.android.apps.maps', totalMB: 310.4, redeAtiva: 'Conectado (' + estadoLocal.rede + ')', emTransmissao: false, usaGeo: true, geoAtiva: true },
+          { nome: 'YouTube', pacote: 'com.google.android.youtube', totalMB: 2140.0, redeAtiva: 'Conectado (' + estadoLocal.rede + ')', emTransmissao: false, usaGeo: false, geoAtiva: false },
+          { nome: 'Chrome', pacote: 'com.android.chrome', totalMB: 490.8, redeAtiva: 'Transmitindo (' + estadoLocal.rede + ')', emTransmissao: true, usaGeo: true, geoAtiva: true }
+        ];
+      }
+      renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+    }
+
+    function definirFiltroApps(filtro) {
+      filtroAtualApps = filtro;
+      document.getElementById('f-todos').classList.toggle('ativo', filtro === 'todos');
+      document.getElementById('f-geo').classList.toggle('ativo', filtro === 'geo');
+      document.getElementById('f-rede').classList.toggle('ativo', filtro === 'rede');
+      document.getElementById('f-bloq').classList.toggle('ativo', filtro === 'bloq');
+      renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+    }
+
+    function renderizarListaApps(listaBase, filtro, containerId, contadorId) {
+      var container = document.getElementById(containerId);
+      var filtrados = (listaBase || []).map(function(a) {
+        var bloq = appEstaBloqueado(a.pacote);
+        return {
+          nome: a.nome,
+          pacote: a.pacote,
+          totalMB: a.totalMB,
+          redeAtiva: bloq ? 'Internet Bloqueada' : a.redeAtiva,
+          emTransmissao: bloq ? false : a.emTransmissao,
+          usaGeo: a.usaGeo,
+          geoAtiva: a.geoAtiva,
+          bloqueado: bloq
+        };
+      });
+
+      if (filtro === 'geo') {
+        filtrados = filtrados.filter(function(a) { return a.usaGeo; });
+      } else if (filtro === 'rede') {
+        filtrados = filtrados.filter(function(a) { return !a.bloqueado && (a.emTransmissao || a.totalMB > 0); });
+      } else if (filtro === 'bloq') {
+        filtrados = filtrados.filter(function(a) { return a.bloqueado; });
+      }
+
+      document.getElementById(contadorId).textContent = filtrados.length + ' apps';
+      if (filtrados.length === 0) {
+        container.innerHTML = '<div class="sub-info">Nenhum aplicativo listado neste filtro.</div>';
+        return;
+      }
+
+      container.innerHTML = filtrados.map(function(app) {
+        var badgeRede;
+        if (app.bloqueado) {
+          badgeRede = '<span class="tag tag-net-block">🚫 Bloqueado pela Central</span>';
+        } else if (app.emTransmissao) {
+          badgeRede = '<span class="tag tag-net-on">🟢 ' + (app.redeAtiva || 'Em Tráfego') + '</span>';
+        } else {
+          badgeRede = '<span class="tag tag-net-idle">📶 ' + (app.redeAtiva || 'Conectado') + '</span>';
+        }
+
+        var badgeGeo = app.usaGeo
+          ? (app.geoAtiva ? '<span class="tag tag-geo-on">📍 GPS Ativo</span>' : '<span class="tag tag-geo-off">📍 GPS s/ Permissão</span>')
+          : '<span class="tag tag-geo-off">🔒 Sem GPS</span>';
+        var mb = Number(app.totalMB || 0);
+        var valorFormatado = mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+
+        return '<div class="app-item ' + (app.bloqueado ? 'app-bloqueado' : '') + '">' +
+          '<div class="app-main">' +
+            '<div class="app-nome">' + app.nome + '</div>' +
+            '<div class="app-pkg">' + (app.pacote || '') + '</div>' +
+            '<div class="app-badges">' + badgeRede + ' ' + badgeGeo + '</div>' +
+          '</div>' +
+          '<div class="app-consumo">' + valorFormatado + '</div>' +
+        '</div>';
+      }).join('');
+    }
+
+    function iniciarConexaoNuvem() {
+      try {
+        if (typeof mqtt !== 'undefined') {
+          clientMqtt = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+            clientId: 'mon_' + deviceId + '_' + Math.floor(Math.random() * 9999),
+            clean: true,
+            reconnectPeriod: 3000
+          });
+
+          clientMqtt.on('connect', function() {
+            document.getElementById('statusNuvemTopo').textContent = '☁️ Sincronizado • ID: ' + deviceId;
+            clientMqtt.subscribe(PREFIXO_CMD + deviceId, { qos: 0 });
+            enviarPacoteAutomatico();
+          });
+
+          clientMqtt.on('message', function(topic, message) {
+            try {
+              var cmd = JSON.parse(message.toString());
+              if (!cmd) return;
+
+              if (cmd.acao === 'FIREWALL_GERAL' || cmd.acao === 'DESLIGAR_DADOS' || cmd.acao === 'RELIGAR_DADOS') {
+                if (cmd.acao === 'DESLIGAR_DADOS') firewallGeralAtivo = true;
+                else if (cmd.acao === 'RELIGAR_DADOS') firewallGeralAtivo = false;
+                else firewallGeralAtivo = Boolean(cmd.bloquear);
+
+                salvarDado('firewallGeral_v7', firewallGeralAtivo ? 'true' : 'false');
+                atualizarInterfaceFirewall();
+              }
+
+              if (cmd.acao === 'FIREWALL_APP' && cmd.pacote) {
+                if (cmd.bloquear) {
+                  appsBloqueadosMap[cmd.pacote] = true;
+                } else {
+                  delete appsBloqueadosMap[cmd.pacote];
+                }
+                salvarDado('appsBloqueados_v7', JSON.stringify(appsBloqueadosMap));
+                atualizarInterfaceFirewall();
+              }
+            } catch (e) {}
+          });
+        }
+      } catch (e) {}
+    }
+
+    function enviarPacoteAutomatico() {
+      var consumoLiquido = Math.max(0, ultimoConsumoBrutoGB - offsetZeroGB);
+      var appsCompactados = (cacheApps || []).slice(0, 15).map(function(a) {
+        var bloq = appEstaBloqueado(a.pacote);
+        return {
+          nome: a.nome,
+          pacote: a.pacote,
+          totalMB: Number(Number(a.totalMB || 0).toFixed(1)),
+          redeAtiva: bloq ? '🚫 Internet Bloqueada' : a.redeAtiva,
+          emTransmissao: bloq ? false : Boolean(a.emTransmissao),
+          usaGeo: Boolean(a.usaGeo),
+          geoAtiva: Boolean(a.geoAtiva),
+          bloqueado: bloq
+        };
+      });
+
+      var pacote = {
+        deviceId: deviceId,
+        nome: nomeAparelho,
+        timestamp: Date.now(),
+        consumoGB: Number(consumoLiquido.toFixed(2)),
+        planoGB: planoGB,
+        rede: firewallGeralAtivo ? '🛡️ Apps Bloqueados' : estadoLocal.rede,
+        dadosDesligados: firewallGeralAtivo,
+        appsBloqueadosMap: appsBloqueadosMap,
+        velocidade: firewallGeralAtivo ? 0 : Number(Number(estadoLocal.velocidade || 0).toFixed(1)),
+        latencia: firewallGeralAtivo ? 0 : (estadoLocal.latencia || 22),
+        cidade: estadoLocal.cidade,
+        operadora: estadoLocal.operadora,
+        lat: Number(Number(estadoLocal.lat || -3.7361).toFixed(5)),
+        lon: Number(Number(estadoLocal.lon || -38.6531).toFixed(5)),
+        apps: appsCompactados
+      };
+
+      if (clientMqtt && clientMqtt.connected) {
+        clientMqtt.publish(PREFIXO_MQTT + deviceId, JSON.stringify(pacote), { qos: 0, retain: true });
+        document.getElementById('statusNuvemTopo').textContent = '☁️ Sincronizado • ID: ' + deviceId;
+      }
+    }
+
+    carregarAppsInstalados();
+    atualizarGeolocalizacaoRede();
+    atualizarInterfaceFirewall();
+    iniciarConexaoNuvem();
+
+    setTimeout(enviarPacoteAutomatico, 1000);
+    setInterval(enviarPacoteAutomatico, 8000);
+    setInterval(atualizarPainelLocal, 3000);
+    setInterval(carregarAppsInstalados, 8000);
+  </script>
+</body>
+</html>
