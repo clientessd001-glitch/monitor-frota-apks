@@ -1,1 +1,345 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Central de Monitoramento</title>
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b1120; --card: #151f32; --card-dark: #0f172a; --border: #263554;
+      --primary: #38bdf8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+      --text: #f8fafc; --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 12px; padding-bottom: 40px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .header h1 { font-size: 1.15rem; color: var(--primary); }
+    .badge-rede { background: rgba(34,197,94,0.18); color: var(--success); border: 1px solid var(--success); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+    .card-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .sub-info { font-size: 0.82rem; color: var(--muted); line-height: 1.4; }
+    .grid-4 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric-box { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .metric-label { font-size: 0.72rem; color: var(--muted); }
+    .metric-val { font-size: 1rem; font-weight: 700; margin-top: 3px; color: var(--text); }
+    button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-dark); color: var(--text); font-size: 0.88rem; margin-top: 6px; font-weight: 700; cursor: pointer; }
+    button.btn-sec { background: #1e293b; color: var(--text); }
+    button.btn-danger { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid var(--danger); }
+    button.btn-success { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid var(--success); }
+    .filtros-apps { display: flex; gap: 6px; margin-bottom: 10px; overflow-x: auto; }
+    .filtro-btn { width: auto; padding: 6px 12px; font-size: 0.75rem; border-radius: 999px; background: var(--card-dark); color: var(--muted); border: 1px solid var(--border); margin-top: 0; white-space: nowrap; }
+    .filtro-btn.ativo { background: var(--primary); color: #082f49; border-color: var(--primary); }
+    .app-list { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; }
+    .app-item { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .app-item.app-bloqueado { border-color: var(--danger); background: rgba(239,68,68,0.08); }
+    .app-main { flex: 1; min-width: 0; }
+    .app-nome { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .app-pkg { font-size: 0.7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .app-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+    .tag { font-size: 0.68rem; padding: 2px 7px; border-radius: 6px; font-weight: 600; display: inline-block; }
+    .tag-net-on { background: rgba(34,197,94,0.2); color: #4ade80; }
+    .tag-net-idle { background: rgba(56,189,248,0.15); color: #38bdf8; }
+    .tag-net-block { background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid var(--danger); }
+    .tag-geo-on { background: rgba(245,158,11,0.2); color: #fbbf24; }
+    .app-right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+    .app-consumo { font-weight: 800; font-size: 0.88rem; color: var(--primary); white-space: nowrap; }
+    .btn-app-lock { width: auto; padding: 4px 10px; font-size: 0.72rem; border-radius: 6px; margin-top: 0; white-space: nowrap; }
+    .device-card { background: var(--card-dark); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+    .device-card.bloqueado { border-color: var(--danger); }
+    .device-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .device-name { font-size: 1rem; font-weight: 800; color: var(--text); }
+    .status-dot { font-size: 0.72rem; padding: 3px 8px; border-radius: 999px; font-weight: 700; }
+    .status-online { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid var(--success); }
+    .status-offline { background: rgba(148,163,184,0.15); color: var(--muted); border: 1px solid var(--border); }
+    .status-blocked { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid var(--danger); }
+    .device-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .device-actions button { padding: 8px; font-size: 0.8rem; margin-top: 0; }
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.82); z-index: 1000; padding: 12px; overflow-y: auto; }
+    .modal-box { background: var(--card); border: 1px solid var(--primary); border-radius: 14px; padding: 14px; max-width: 600px; margin: 10px auto; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🖥️ Central de Monitoramento</h1>
+    <span id="statusCentral" class="badge-rede">🟢 Conectando...</span>
+  </div>
 
+  <div class="grid-4">
+    <div class="metric-box"><div class="metric-label">Aparelhos</div><div class="metric-val" id="resumoTotalAparelhos">0</div></div>
+    <div class="metric-box"><div class="metric-label">Online</div><div class="metric-val" id="resumoOnlineAgora" style="color: var(--success);">0</div></div>
+    <div class="metric-box"><div class="metric-label">Consumo Total</div><div class="metric-val" id="resumoConsumoFrota" style="color: var(--primary);">0.00 GB</div></div>
+    <div class="metric-box"><div class="metric-label">Com GPS</div><div class="metric-val" id="resumoComGps" style="color: var(--warning);">0</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>📲 Aparelhos Conectados</span>
+      <div style="display:flex; gap:6px;">
+        <button class="filtro-btn ativo" onclick="simularAparelhoExtra()">🧪 Simular +1</button>
+        <button class="filtro-btn" onclick="reconectarTudo()">🔄 Atualizar</button>
+        <button class="filtro-btn" onclick="limparListaCentral()">🗑️ Limpar</button>
+      </div>
+    </div>
+    <div id="listaFrotaContainer"><div class="sub-info">Escutando aparelhos em tempo real...</div></div>
+  </div>
+
+  <div id="modalAparelhoRemoto" class="modal-overlay">
+    <div class="modal-box">
+      <div class="card-title">
+        <span id="modalTituloAparelho" style="color:var(--primary); font-size:0.95rem;">Detalhes do Aparelho</span>
+        <button class="filtro-btn" onclick="fecharModalRemoto()">✖ Fechar</button>
+      </div>
+      <div class="grid-2" style="margin-bottom: 10px;">
+        <div class="metric-box"><div class="metric-label">Consumo / Plano</div><div class="metric-val" id="modalConsumoPlano">--</div></div>
+        <div class="metric-box"><div class="metric-label">Rede Ativa / Ping</div><div class="metric-val" id="modalRedePing" style="font-size:0.88rem;">--</div></div>
+        <div class="metric-box"><div class="metric-label">Localização / Cidade</div><div class="metric-val" id="modalCidadeOp" style="font-size:0.85rem;">--</div></div>
+        <div class="metric-box"><div class="metric-label">Coordenadas GPS</div><div class="metric-val" id="modalCoordsGps" style="font-size:0.82rem;">--</div></div>
+      </div>
+      <div class="grid-2" style="margin-bottom: 12px;">
+        <button id="btnAbrirMapaModal" class="btn-sec" style="margin-top:0;">🗺️ Abrir no Mapa</button>
+        <button id="btnToggleDadosModal" class="btn-danger" style="margin-top:0;">🛡️ Bloquear Todos</button>
+      </div>
+      <div class="card-title">
+        <span>📱 Controle de Internet por Aplicativo</span>
+        <span id="modalContadorApps">0 apps</span>
+      </div>
+      <div class="filtros-apps">
+        <button class="filtro-btn ativo" id="mf-todos" onclick="filtrarAppsRemoto('todos')">Todos</button>
+        <button class="filtro-btn" id="mf-geo" onclick="filtrarAppsRemoto('geo')">📍 Com GPS</button>
+        <button class="filtro-btn" id="mf-rede" onclick="filtrarAppsRemoto('rede')">🟢 Em Tráfego</button>
+        <button class="filtro-btn" id="mf-bloq" onclick="filtrarAppsRemoto('bloq')">🚫 Bloqueados</button>
+      </div>
+      <div class="app-list" id="modalListaApps"></div>
+    </div>
+  </div>
+
+  <script>
+    var memoriaSegura = {};
+    function lerDado(chave, padrao) {
+      try { var val = window.localStorage.getItem(chave); return val !== null ? val : padrao; }
+      catch (e) { return memoriaSegura[chave] !== undefined ? memoriaSegura[chave] : padrao; }
+    }
+    function salvarDado(chave, valor) {
+      memoriaSegura[chave] = String(valor);
+      try { window.localStorage.setItem(chave, String(valor)); } catch (e) {}
+    }
+
+    var PREFIXO_MQTT = 'frota_josimar_2026_v6/aparelhos/';
+    var PREFIXO_CMD = 'frota_josimar_2026_v6/comandos/';
+    var clientMqtt = null;
+    var frotaAparelhos = {};
+    try { frotaAparelhos = JSON.parse(lerDado('frotaAparelhos_v6', '{}')) || {}; } catch (e) { frotaAparelhos = {}; }
+
+    var aparelhoRemotoSelecionado = null;
+    var filtroModalRemoto = 'todos';
+
+    function registrarAparelhoNaTela(payload) {
+      if (!payload || !payload.deviceId) return;
+      frotaAparelhos[payload.deviceId] = payload;
+      salvarDado('frotaAparelhos_v6', JSON.stringify(frotaAparelhos));
+      renderizarFrota();
+      document.getElementById('statusCentral').textContent = '🟢 Ao Vivo (' + Object.keys(frotaAparelhos).length + ')';
+      if (aparelhoRemotoSelecionado === payload.deviceId) { preencherModalRemoto(payload); }
+    }
+
+    function conectarMqttCentral() {
+      try {
+        if (typeof mqtt === 'undefined') return;
+        if (clientMqtt) { try { clientMqtt.end(true); } catch (e) {} }
+        clientMqtt = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: 'central_' + Math.floor(Math.random() * 999999), clean: true, reconnectPeriod: 3000 });
+        clientMqtt.on('connect', function() {
+          document.getElementById('statusCentral').textContent = '🟢 Ao Vivo (' + Object.keys(frotaAparelhos).length + ')';
+          clientMqtt.subscribe(PREFIXO_MQTT + '+', { qos: 0 });
+        });
+        clientMqtt.on('message', function(topic, message) {
+          try {
+            var texto = message.toString();
+            if (!texto) return;
+            var payload = JSON.parse(texto);
+            if (payload && payload.deviceId) { registrarAparelhoNaTela(payload); }
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    function alternarFirewallGeralAparelho(id) {
+      var d = frotaAparelhos[id];
+      if (!d) return;
+      var bloquearAgora = !Boolean(d.dadosDesligados);
+      var comando = { deviceId: id, acao: 'FIREWALL_GERAL', bloquear: bloquearAgora, timestamp: Date.now() };
+
+      d.dadosDesligados = bloquearAgora;
+      d.rede = bloquearAgora ? '🛡️ Apps Bloqueados' : '4G/5G Móvel';
+      if (bloquearAgora) d.velocidade = 0;
+
+      if (d.apps && d.apps.length > 0) {
+        for (var i = 0; i < d.apps.length; i++) {
+          d.apps[i].bloqueado = bloquearAgora || Boolean(d.appsBloqueadosMap && d.appsBloqueadosMap[d.apps[i].pacote]);
+        }
+      }
+      registrarAparelhoNaTela(d);
+
+      if (clientMqtt && clientMqtt.connected) {
+        clientMqtt.publish(PREFIXO_CMD + id, JSON.stringify(comando), { qos: 0, retain: true });
+        clientMqtt.publish(PREFIXO_MQTT + id, JSON.stringify(d), { qos: 0, retain: true });
+      }
+    }
+
+    function alternarBloqueioAppIndividual(id, pacoteApp) {
+      var d = frotaAparelhos[id];
+      if (!d || !pacoteApp) return;
+      if (!d.appsBloqueadosMap) d.appsBloqueadosMap = {};
+      var bloquearApp = !Boolean(d.appsBloqueadosMap[pacoteApp]);
+
+      if (bloquearApp) { d.appsBloqueadosMap[pacoteApp] = true; } else { delete d.appsBloqueadosMap[pacoteApp]; }
+
+      if (d.apps && d.apps.length > 0) {
+        for (var i = 0; i < d.apps.length; i++) {
+          if (d.apps[i].pacote === pacoteApp) {
+            d.apps[i].bloqueado = Boolean(d.dadosDesligados) || bloquearApp;
+          }
+        }
+      }
+
+      var comando = { deviceId: id, acao: 'FIREWALL_APP', pacote: pacoteApp, bloquear: bloquearApp, timestamp: Date.now() };
+      registrarAparelhoNaTela(d);
+
+      if (clientMqtt && clientMqtt.connected) {
+        clientMqtt.publish(PREFIXO_CMD + id, JSON.stringify(comando), { qos: 0, retain: true });
+        clientMqtt.publish(PREFIXO_MQTT + id, JSON.stringify(d), { qos: 0, retain: true });
+      }
+    }
+
+    function reconectarTudo() { document.getElementById('statusCentral').textContent = '🔄 Sincronizando...'; conectarMqttCentral(); renderizarFrota(); }
+    function limparListaCentral() { frotaAparelhos = {}; salvarDado('frotaAparelhos_v6', '{}'); renderizarFrota(); }
+
+    function simularAparelhoExtra() {
+      var modelos = ['Samsung Galaxy A54', 'Motorola Moto G84', 'Xiaomi Redmi Note 13'];
+      var idSim = 'CEL-' + Math.floor(Math.random() * 900 + 100);
+      var pacoteTeste = {
+        deviceId: idSim, nome: modelos[Math.floor(Math.random() * modelos.length)] + ' • ' + idSim, timestamp: Date.now(),
+        consumoGB: 5.2, planoGB: 43, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosMap: {}, velocidade: 45.5, latencia: 18,
+        cidade: 'Caucaia - CE', operadora: 'Vivo', lat: -3.7361, lon: -38.6531,
+        apps: [
+          { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 1420.5, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false },
+          { nome: 'Instagram', pacote: 'com.instagram.android', totalMB: 2310.0, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false }
+        ]
+      };
+      registrarAparelhoNaTela(pacoteTeste);
+      if (clientMqtt && clientMqtt.connected) { clientMqtt.publish(PREFIXO_MQTT + idSim, JSON.stringify(pacoteTeste), { qos: 0, retain: true }); }
+    }
+
+    function renderizarFrota() {
+      var chaves = Object.keys(frotaAparelhos);
+      var lista = [];
+      for (var i = 0; i < chaves.length; i++) { lista.push(frotaAparelhos[chaves[i]]); }
+      lista.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
+
+      document.getElementById('resumoTotalAparelhos').textContent = String(lista.length);
+      var onlineCount = 0, somaGB = 0, gpsCount = 0, agora = Date.now();
+
+      for (var j = 0; j < lista.length; j++) {
+        var d = lista[j];
+        if (Math.floor((agora - (d.timestamp || 0)) / 1000) <= 90) onlineCount++;
+        somaGB += Number(d.consumoGB || 0);
+        if (d.lat && d.lon && (d.lat !== 0 || d.lon !== 0)) gpsCount++;
+      }
+
+      document.getElementById('resumoOnlineAgora').textContent = String(onlineCount);
+      document.getElementById('resumoConsumoFrota').textContent = somaGB.toFixed(2) + ' GB';
+      document.getElementById('resumoComGps').textContent = String(gpsCount);
+
+      var container = document.getElementById('listaFrotaContainer');
+      if (lista.length === 0) { container.innerHTML = '<div class="sub-info">Nenhum aparelho conectado ainda.</div>'; return; }
+
+      container.innerHTML = lista.map(function(item) {
+        var diffSeg = Math.max(0, Math.floor((agora - (item.timestamp || 0)) / 1000));
+        var isOnline = diffSeg <= 90;
+        var bloqueado = Boolean(item.dadosDesligados);
+        var qtdBloqIndiv = (item.apps || []).filter(function(a) { return a.bloqueado; }).length;
+        var tempoTexto = bloqueado ? 'Apps Bloqueados' : (isOnline ? 'Online agora' : 'Offline');
+
+        var btnAppsHtml = bloqueado ? '<button class="btn-success" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🟢 Liberar Apps</button>' : '<button class="btn-danger" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🛡️ Bloquear Apps</button>';
+        var tagAppsInfo = qtdBloqIndiv > 0 ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' apps bloqueados</span>' : '<span class="tag tag-net-on">📦 Apps liberados</span>';
+
+        return '<div class="device-card ' + (bloqueado ? 'bloqueado' : '') + '">' +
+          '<div class="device-header"><div><div class="device-name">📱 ' + item.nome + '</div><div class="app-pkg">ID: ' + item.deviceId + '</div></div>' +
+          '<span class="status-dot ' + (bloqueado ? 'status-blocked' : (isOnline ? 'status-online' : 'status-offline')) + '">' + tempoTexto + '</span></div>' +
+          '<div class="grid-2"><div class="metric-box"><div class="metric-label">Consumo</div><div class="metric-val" style="color:var(--primary);">' + Number(item.consumoGB || 0).toFixed(2) + ' GB</div></div>' +
+          '<div class="metric-box"><div class="metric-label">Rede</div><div class="metric-val" style="font-size:0.88rem;">' + item.rede + '</div></div></div>' +
+          '<div class="app-badges" style="margin-top: 8px;"><span class="tag tag-geo-on">📍 ' + item.cidade + '</span>' + tagAppsInfo + '</div>' +
+          '<div class="device-actions"><button onclick="abrirModalRemoto(\'' + item.deviceId + '\')">🔍 Gerenciar Apps</button>' + btnAppsHtml + '</div></div>';
+      }).join('');
+    }
+
+    function abrirModalRemoto(id) {
+      var dados = frotaAparelhos[id];
+      if (!dados) return;
+      aparelhoRemotoSelecionado = id;
+      filtroModalRemoto = 'todos';
+      preencherModalRemoto(dados);
+      document.getElementById('modalAparelhoRemoto').style.display = 'block';
+    }
+
+    function preencherModalRemoto(d) {
+      document.getElementById('modalTituloAparelho').textContent = '📱 ' + d.nome;
+      document.getElementById('modalConsumoPlano').textContent = Number(d.consumoGB || 0).toFixed(2) + ' GB';
+      document.getElementById('modalRedePing').textContent = d.rede + ' • ' + d.latencia + ' ms';
+      document.getElementById('modalCidadeOp').textContent = d.cidade + ' (' + d.operadora + ')';
+      document.getElementById('modalCoordsGps').textContent = d.lat.toFixed(4) + ', ' + d.lon.toFixed(4);
+
+      document.getElementById('btnAbrirMapaModal').onclick = function() {
+        if (d.lat && d.lon) { window.open('https://www.google.com/maps?q=' + d.lat + ',' + d.lon, '_blank'); }
+      };
+
+      var btnToggle = document.getElementById('btnToggleDadosModal');
+      btnToggle.textContent = d.dadosDesligados ? '🟢 Liberar Todos' : '🛡️ Bloquear Todos';
+      btnToggle.className = d.dadosDesligados ? 'btn-success' : 'btn-danger';
+      btnToggle.onclick = function() { alternarFirewallGeralAparelho(d.deviceId); };
+      filtrarAppsRemoto(filtroModalRemoto);
+    }
+
+    function filtrarAppsRemoto(filtro) {
+      filtroModalRemoto = filtro;
+      document.getElementById('mf-todos').classList.toggle('ativo', filtro === 'todos');
+      document.getElementById('mf-geo').classList.toggle('ativo', filtro === 'geo');
+      document.getElementById('mf-rede').classList.toggle('ativo', filtro === 'rede');
+      document.getElementById('mf-bloq').classList.toggle('ativo', filtro === 'bloq');
+
+      var d = frotaAparelhos[aparelhoRemotoSelecionado];
+      var lista = d ? (d.apps || []) : [];
+      renderizarListaAppsRemoto(lista, filtro, d);
+    }
+
+    function renderizarListaAppsRemoto(listaBase, filtro, dadosAparelho) {
+      var container = document.getElementById('modalListaApps');
+      var filtrados = listaBase || [];
+
+      if (filtro === 'geo') { filtrados = filtrados.filter(function(a) { return a.usaGeo; }); }
+      else if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado && a.emTransmissao; }); }
+      else if (filtro === 'bloq') { filtrados = filtrados.filter(function(a) { return a.bloqueado; }); }
+
+      document.getElementById('modalContadorApps').textContent = filtrados.length + ' apps';
+      if (filtrados.length === 0) { container.innerHTML = '<div class="sub-info">Nenhum aplicativo listado.</div>'; return; }
+
+      var devId = dadosAparelho ? dadosAparelho.deviceId : '';
+      container.innerHTML = filtrados.map(function(app) {
+        var estaBloq = Boolean(app.bloqueado) || Boolean(dadosAparelho && dadosAparelho.dadosDesligados);
+        var btnAppHtml = estaBloq ? '<button class="btn-success btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🟢 Liberar</button>' : '<button class="btn-danger btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🚫 Bloquear</button>';
+        return '<div class="app-item ' + (estaBloq ? 'app-bloqueado' : '') + '">' +
+          '<div class="app-main"><div class="app-nome">' + app.nome + '</div><div class="app-pkg">' + app.pacote + '</div>' +
+          '<div class="app-badges">' + (estaBloq ? '<span class="tag tag-net-block">🚫 Bloqueado</span>' : '<span class="tag tag-net-on">🟢 Liberado</span>') + '</div></div>' +
+          '<div class="app-right"><div class="app-consumo">' + app.totalMB + ' MB</div>' + btnAppHtml + '</div></div>';
+      }).join('');
+    }
+
+    function fecharModalRemoto() { aparelhoRemotoSelecionado = null; document.getElementById('modalAparelhoRemoto').style.display = 'none'; }
+
+    renderizarFrota();
+    conectarMqttCentral();
+    setInterval(renderizarFrota, 5000);
+  </script>
+</body>
+</html>
