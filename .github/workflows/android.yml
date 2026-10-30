@@ -1,4 +1,4 @@
-name: Gerar 2 APKs - Monitor e Central
+name: Gerar 2 APKs - Monitor e Central (v10.1 GPS Preciso + Cidade Real)
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 1. Baixar código do repositório
+      - name: 1. Baixar repositorio
         uses: actions/checkout@v4
 
       - name: 2. Configurar Java JDK 17
@@ -19,23 +19,2806 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 3. Configurar Android SDK e Gradle
-        uses: android-actions/setup-android@v3
+      - name: 3. Instalar Gradle 7.6.4 e Android SDK
+        run: |
+          curl -sL https://services.gradle.org/distributions/gradle-7.6.4-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp
 
-      - name: 4. Configurar Gradle 7.6
-        uses: gradle/gradle-build-action@v2
-        with:
-          gradle-version: '7.6.4'
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          curl -sL https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -o commandlinetools.zip
+          unzip -q commandlinetools.zip
+          mkdir -p latest
+          mv cmdline-tools/* latest/ 2>/dev/null || true
+          rm -rf commandlinetools.zip
 
-      - name: 5. Preparar estrutura base do projeto Android
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-33" "build-tools;33.0.2" > /dev/null 2>&1
+
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+
+      - name: 4. Gerar todos os arquivos completos do projeto (100% Firebase + GPS Alta Precisao)
         run: |
           mkdir -p app/src/main/assets
           mkdir -p app/src/main/java/com/example/monitordados
           mkdir -p APKs-Prontos
 
-          if [ -f "central.html" ] && [ ! -f "app/src/main/assets/central.html" ]; then
-            cp central.html app/src/main/assets/central.html
-          fi
+          # ===================================================================
+          # 1. ANDROIDMANIFEST.XML COMPLETO
+          # ===================================================================
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools"
+              package="com.example.monitordados">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Monitor de Dados"
+                  android:icon="@android:drawable/ic_dialog_info"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MainActivity$MonitorSempreAtivoService"
+                      android:enabled="true"
+                      android:exported="false" />
+
+                  <service
+                      android:name=".MainActivity$FirewallVpnService"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+
+                  <receiver
+                      android:name=".MainActivity$BootReceiver"
+                      android:enabled="true"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      </intent-filter>
+                  </receiver>
+
+              </application>
+          </manifest>
+          EOF
+          sed -i 's/^          //' app/src/main/AndroidManifest.xml
+
+          # ===================================================================
+          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE 24H + GPS PRECISO + GEOCODER REAL)
+          # ===================================================================
+          cat << 'EOF' > app/src/main/java/com/example/monitordados/MainActivity.java
+          package com.example.monitordados;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlarmManager;
+          import android.app.AppOpsManager;
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.app.usage.NetworkStats;
+          import android.app.usage.NetworkStatsManager;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.MutableContextWrapper;
+          import android.content.SharedPreferences;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageInfo;
+          import android.content.pm.PackageManager;
+          import android.location.Address;
+          import android.location.Geocoder;
+          import android.location.Location;
+          import android.location.LocationListener;
+          import android.location.LocationManager;
+          import android.net.ConnectivityManager;
+          import android.net.Network;
+          import android.net.NetworkCapabilities;
+          import android.net.TrafficStats;
+          import android.net.Uri;
+          import android.net.VpnService;
+          import android.net.wifi.WifiManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.ParcelFileDescriptor;
+          import android.os.PowerManager;
+          import android.os.Process;
+          import android.os.SystemClock;
+          import android.provider.Settings;
+          import android.telephony.TelephonyManager;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.GeolocationPermissions;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayList;
+          import java.util.Calendar;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.Iterator;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Random;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public class MainActivity extends Activity {
+
+              private static final int REQ_PERMISSOES = 101;
+              private static final int REQ_VPN = 102;
+              private static final String PREFS_NAME = "MonitorFrotaPrefs";
+              private static final String FIREBASE_URL = "https://painel-2d29e-default-rtdb.firebaseio.com";
+
+              public static MutableContextWrapper contextWrapperGlobal = null;
+              public static WebViewSempreAtivo webViewGlobal = null;
+              public static MainActivity instanciaAtiva = null;
+
+              private static final ExecutorService executorFirebaseNativo = Executors.newSingleThreadExecutor();
+              private static volatile double ultimaVelocidadeMbps = 0.0;
+              private static volatile int ultimaLatenciaMs = 22;
+              private static long ultimoRxBytesTotal = 0;
+              private static long ultimoTxBytesTotal = 0;
+              private static long ultimoTempoLeitura = 0;
+
+              // Cache em tempo real de GPS de Alta Precisao e Endereco/Cidade
+              private static volatile double melhorLat = 0.0;
+              private static volatile double melhorLon = 0.0;
+              private static volatile float melhorPrecisaoMetros = 99999f;
+              private static volatile long ultimoTempoGps = 0L;
+              private static volatile String cidadeDetectadaCache = "";
+              private static volatile String enderecoDetectadoCache = "";
+              private static double ultimaLatGeocodificada = 0.0;
+              private static double ultimaLonGeocodificada = 0.0;
+              private static long ultimoTempoGeocoder = 0L;
+              private static LocationListener listenerGpsAtivo = null;
+
+              public static boolean ehAppCentral(Context context) {
+                  if (context == null || context.getPackageName() == null) return false;
+                  return context.getPackageName().contains("painelcentral");
+              }
+
+              public static SharedPreferences getPrefs(Context context) {
+                  return context.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+              }
+
+              public static synchronized String obterOuCriarDeviceId(Context context) {
+                  SharedPreferences prefs = getPrefs(context);
+                  String id = prefs.getString("deviceId_v6", "");
+                  if (id == null || id.trim().isEmpty()) {
+                      String chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+                      Random rnd = new Random();
+                      StringBuilder sb = new StringBuilder("CEL-");
+                      for (int i = 0; i < 4; i++) {
+                          sb.append(chars.charAt(rnd.nextInt(chars.length())));
+                      }
+                      id = sb.toString();
+                      prefs.edit().putString("deviceId_v6", id).apply();
+                  }
+                  return id;
+              }
+
+              public static synchronized String obterOuCriarNomeAparelho(Context context) {
+                  SharedPreferences prefs = getPrefs(context);
+                  String nome = prefs.getString("nomeAparelho_v6", "");
+                  if (nome == null || nome.trim().isEmpty()) {
+                      String modelo = Build.MODEL != null && !Build.MODEL.trim().isEmpty() ? Build.MODEL.trim() : "Android";
+                      nome = modelo + " • " + obterOuCriarDeviceId(context);
+                      prefs.edit().putString("nomeAparelho_v6", nome).apply();
+                  }
+                  return nome;
+              }
+
+              public static synchronized void registrarCoordenadaPrecisa(Context context, double lat, double lon, float precisao) {
+                  if (lat == 0.0 && lon == 0.0) return;
+                  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+                  long agora = System.currentTimeMillis();
+                  boolean maisRecente = (agora - ultimoTempoGps) > 45000;
+                  boolean maisPrecisa = precisao <= 0 || precisao <= (melhorPrecisaoMetros + 25f);
+
+                  if (melhorLat == 0.0 || maisRecente || maisPrecisa) {
+                      melhorLat = lat;
+                      melhorLon = lon;
+                      if (precisao > 0) melhorPrecisaoMetros = precisao;
+                      ultimoTempoGps = agora;
+
+                      try {
+                          SharedPreferences.Editor ed = getPrefs(context).edit();
+                          ed.putString("gps_lat_exata", String.valueOf(lat));
+                          ed.putString("gps_lon_exata", String.valueOf(lon));
+                          ed.apply();
+                      } catch (Throwable ignored) {}
+                  }
+              }
+
+              public static void iniciarRastreadorGpsNativo(final Context context) {
+                  final Context appCtx = context.getApplicationContext();
+                  if (ehAppCentral(appCtx)) return;
+
+                  // Carrega ultima coordenada real salva caso o GPS esteja adquirindo satelite
+                  if (melhorLat == 0.0 && melhorLon == 0.0) {
+                      try {
+                          SharedPreferences prefs = getPrefs(appCtx);
+                          double sLat = Double.parseDouble(prefs.getString("gps_lat_exata", "0"));
+                          double sLon = Double.parseDouble(prefs.getString("gps_lon_exata", "0"));
+                          String sCid = prefs.getString("gps_cidade_real", "");
+                          String sEnd = prefs.getString("gps_endereco_real", "");
+                          if (sLat != 0.0 || sLon != 0.0) {
+                              melhorLat = sLat;
+                              melhorLon = sLon;
+                          }
+                          if (sCid != null && !sCid.isEmpty()) cidadeDetectadaCache = sCid;
+                          if (sEnd != null && !sEnd.isEmpty()) enderecoDetectadoCache = sEnd;
+                      } catch (Throwable ignored) {}
+                  }
+
+                  new Handler(Looper.getMainLooper()).post(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                                      appCtx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                                      appCtx.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                                  return;
+                              }
+
+                              LocationManager lm = (LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
+                              if (lm == null) return;
+
+                              // Leitura imediata do provedor mais preciso disponivel
+                              Location locGps = null;
+                              Location locNet = null;
+                              Location locPass = null;
+                              try { locGps = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Throwable ignored) {}
+                              try { locNet = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER); } catch (Throwable ignored) {}
+                              try { locPass = lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER); } catch (Throwable ignored) {}
+
+                              Location escolhida = null;
+                              if (locGps != null && locNet != null) {
+                                  escolhida = (locGps.getTime() >= locNet.getTime() - 120000) ? locGps : locNet;
+                              } else if (locGps != null) {
+                                  escolhida = locGps;
+                              } else if (locNet != null) {
+                                  escolhida = locNet;
+                              } else if (locPass != null) {
+                                  escolhida = locPass;
+                              }
+
+                              if (escolhida != null) {
+                                  registrarCoordenadaPrecisa(appCtx, escolhida.getLatitude(), escolhida.getLongitude(), escolhida.getAccuracy());
+                              }
+
+                              if (listenerGpsAtivo == null) {
+                                  listenerGpsAtivo = new LocationListener() {
+                                      @Override
+                                      public void onLocationChanged(Location loc) {
+                                          if (loc != null) {
+                                              registrarCoordenadaPrecisa(appCtx, loc.getLatitude(), loc.getLongitude(), loc.getAccuracy());
+                                          }
+                                      }
+                                      @Override public void onStatusChanged(String p, int s, Bundle b) {}
+                                      @Override public void onProviderEnabled(String p) {}
+                                      @Override public void onProviderDisabled(String p) {}
+                                  };
+
+                                  try {
+                                      if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                                          lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
+                                      }
+                                  } catch (Throwable ignored) {}
+
+                                  try {
+                                      if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                                          lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
+                                      }
+                                  } catch (Throwable ignored) {}
+
+                                  try {
+                                      lm.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
+                                  } catch (Throwable ignored) {}
+                              }
+                          } catch (Throwable ignored) {}
+                      }
+                  });
+              }
+
+              private static String abreviarEstadoBrasil(String estado) {
+                  if (estado == null) return "";
+                  String e = estado.trim().toLowerCase(Locale.ROOT);
+                  if (e.length() == 2) return estado.toUpperCase(Locale.ROOT);
+                  if (e.contains("cear")) return "CE";
+                  if (e.contains("paulo")) return "SP";
+                  if (e.contains("janeiro")) return "RJ";
+                  if (e.contains("gerais")) return "MG";
+                  if (e.contains("bahia")) return "BA";
+                  if (e.contains("pernambuco")) return "PE";
+                  if (e.contains("para") && !e.contains("parana") && !e.contains("paraiba")) return "PA";
+                  if (e.contains("paran")) return "PR";
+                  if (e.contains("paraíba") || e.contains("paraiba")) return "PB";
+                  if (e.contains("grande do norte")) return "RN";
+                  if (e.contains("grande do sul")) return "RS";
+                  if (e.contains("catarina")) return "SC";
+                  if (e.contains("goi")) return "GO";
+                  if (e.contains("maranh")) return "MA";
+                  if (e.contains("piau")) return "PI";
+                  if (e.contains("alagoas")) return "AL";
+                  if (e.contains("sergipe")) return "SE";
+                  if (e.contains("amazonas")) return "AM";
+                  if (e.contains("espírito") || e.contains("espirito")) return "ES";
+                  if (e.contains("mato grosso do sul")) return "MS";
+                  if (e.contains("mato grosso")) return "MT";
+                  if (e.contains("distrito federal") || e.contains("brasília") || e.contains("brasilia")) return "DF";
+                  if (e.contains("tocantins")) return "TO";
+                  if (e.contains("rond")) return "RO";
+                  if (e.contains("acre")) return "AC";
+                  if (e.contains("amap")) return "AP";
+                  if (e.contains("roraima")) return "RR";
+                  return estado;
+              }
+
+              private static void atualizarCidadeEEnderecoPorCoordenada(Context appCtx, double lat, double lon) {
+                  if (lat == 0.0 && lon == 0.0) return;
+
+                  long agora = System.currentTimeMillis();
+                  double distMudanca = Math.abs(lat - ultimaLatGeocodificada) + Math.abs(lon - ultimaLonGeocodificada);
+                  if (!cidadeDetectadaCache.isEmpty() && distMudanca < 0.0003 && (agora - ultimoTempoGeocoder) < 60000L) {
+                      return;
+                  }
+
+                  // 1. Tenta o Geocoder Nativo do Android (alta precisao de Rua, Bairro e Cidade)
+                  try {
+                      if (Geocoder.isPresent()) {
+                          Geocoder geocoder = new Geocoder(appCtx, new Locale("pt", "BR"));
+                          List<Address> ends = geocoder.getFromLocation(lat, lon, 1);
+                          if (ends != null && !ends.isEmpty()) {
+                              Address a = ends.get(0);
+                              String cidade = a.getLocality();
+                              if (cidade == null || cidade.trim().isEmpty()) {
+                                  cidade = a.getSubAdminArea();
+                              }
+                              String bairro = a.getSubLocality();
+                              String uf = abreviarEstadoBrasil(a.getAdminArea());
+                              String rua = a.getThoroughfare();
+                              String numero = a.getSubThoroughfare();
+
+                              if (cidade != null && !cidade.trim().isEmpty()) {
+                                  StringBuilder sbCidade = new StringBuilder();
+                                  if (bairro != null && !bairro.trim().isEmpty() && !bairro.equalsIgnoreCase(cidade)) {
+                                      sbCidade.append(bairro.trim()).append(" • ");
+                                  }
+                                  sbCidade.append(cidade.trim());
+                                  if (uf != null && !uf.isEmpty()) {
+                                      sbCidade.append(" - ").append(uf);
+                                  }
+                                  cidadeDetectadaCache = sbCidade.toString();
+
+                                  StringBuilder sbEnd = new StringBuilder();
+                                  if (rua != null && !rua.trim().isEmpty()) {
+                                      sbEnd.append(rua.trim());
+                                      if (numero != null && !numero.trim().isEmpty()) {
+                                          sbEnd.append(", ").append(numero.trim());
+                                      }
+                                      sbEnd.append(" - ");
+                                  }
+                                  sbEnd.append(cidadeDetectadaCache);
+                                  enderecoDetectadoCache = sbEnd.toString();
+
+                                  ultimaLatGeocodificada = lat;
+                                  ultimaLonGeocodificada = lon;
+                                  ultimoTempoGeocoder = agora;
+
+                                  SharedPreferences.Editor ed = getPrefs(appCtx).edit();
+                                  ed.putString("gps_cidade_real", cidadeDetectadaCache);
+                                  ed.putString("gps_endereco_real", enderecoDetectadoCache);
+                                  ed.apply();
+                                  return;
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {}
+
+                  // 2. Fallback via API reversa gratuita caso a ROM nao tenha Geocoder nativo
+                  try {
+                      String urlApi = "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + lat + "&longitude=" + lon + "&localityLanguage=pt";
+                      String resp = requisicaoHttpFirebase(urlApi, "GET", null);
+                      if (resp != null && resp.startsWith("{")) {
+                          JSONObject geo = new JSONObject(resp);
+                          String cid = geo.optString("city", "");
+                          if (cid.isEmpty()) cid = geo.optString("locality", "");
+                          String bairro = geo.optString("locality", "");
+                          String estado = abreviarEstadoBrasil(geo.optString("principalSubdivision", ""));
+
+                          if (!cid.isEmpty()) {
+                              StringBuilder sb = new StringBuilder();
+                              if (!bairro.isEmpty() && !bairro.equalsIgnoreCase(cid)) {
+                                  sb.append(bairro).append(" • ");
+                              }
+                              sb.append(cid);
+                              if (!estado.isEmpty()) sb.append(" - ").append(estado);
+
+                              cidadeDetectadaCache = sb.toString();
+                              enderecoDetectadoCache = cidadeDetectadaCache;
+                              ultimaLatGeocodificada = lat;
+                              ultimaLonGeocodificada = lon;
+                              ultimoTempoGeocoder = agora;
+
+                              SharedPreferences.Editor ed = getPrefs(appCtx).edit();
+                              ed.putString("gps_cidade_real", cidadeDetectadaCache);
+                              ed.putString("gps_endereco_real", enderecoDetectadoCache);
+                              ed.apply();
+                          }
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              public static class WebViewSempreAtivo extends WebView {
+                  public WebViewSempreAtivo(Context context) {
+                      super(context);
+                  }
+                  @Override
+                  protected void onWindowVisibilityChanged(int visibility) {
+                      super.onWindowVisibilityChanged(View.VISIBLE);
+                  }
+              }
+
+              private static boolean tratarUrlExterna(Context ctx, String url) {
+                  if (url == null || url.isEmpty()) return false;
+                  if (url.startsWith("file:///")) return false;
+
+                  try {
+                      if (url.startsWith("intent://")) {
+                          Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+                          if (intent != null) {
+                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                              try {
+                                  ctx.startActivity(intent);
+                                  return true;
+                              } catch (Throwable e) {
+                                  String fallbackUrl = intent.getStringExtra("browser_fallback_url");
+                                  if (fallbackUrl != null && !fallbackUrl.isEmpty()) {
+                                      Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl));
+                                      browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                      ctx.startActivity(browserIntent);
+                                      return true;
+                                  }
+                              }
+                          }
+                          return true;
+                      }
+
+                      if (url.startsWith("geo:") || url.contains("google.com/maps")) {
+                          Intent mapIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                          mapIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          ctx.startActivity(mapIntent);
+                          return true;
+                      }
+                  } catch (Throwable ignored) {}
+                  return false;
+              }
+
+              public static synchronized void garantirMotorWebAtivo(final Context context) {
+                  final Context appCtx = context.getApplicationContext();
+                  if (Looper.myLooper() != Looper.getMainLooper()) {
+                      new Handler(Looper.getMainLooper()).post(new Runnable() {
+                          @Override
+                          public void run() {
+                              garantirMotorWebAtivo(context);
+                          }
+                      });
+                      return;
+                  }
+
+                  if (contextWrapperGlobal == null) {
+                      contextWrapperGlobal = new MutableContextWrapper(context instanceof Activity ? context : appCtx);
+                  } else if (context instanceof Activity) {
+                      contextWrapperGlobal.setBaseContext(context);
+                  }
+
+                  if (webViewGlobal == null) {
+                      webViewGlobal = new WebViewSempreAtivo(contextWrapperGlobal);
+                      WebSettings settings = webViewGlobal.getSettings();
+                      settings.setJavaScriptEnabled(true);
+                      settings.setDomStorageEnabled(true);
+                      settings.setGeolocationEnabled(true);
+                      settings.setAllowFileAccess(true);
+                      settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                          settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                      }
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                          settings.setMediaPlaybackRequiresUserGesture(false);
+                      }
+
+                      webViewGlobal.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                              return tratarUrlExterna(appCtx, url);
+                          }
+
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && request != null && request.getUrl() != null) {
+                                  return tratarUrlExterna(appCtx, request.getUrl().toString());
+                              }
+                              return false;
+                          }
+                      });
+
+                      webViewGlobal.setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+                              callback.invoke(origin, true, false);
+                          }
+                      });
+
+                      webViewGlobal.addJavascriptInterface(new PonteMonitorDados(appCtx), "AndroidMonitor");
+                      webViewGlobal.loadUrl("file:///android_asset/index.html");
+                  }
+
+                  webViewGlobal.onResume();
+                  webViewGlobal.resumeTimers();
+              }
+
+              public static void acionarPulsoWebView(final Context context) {
+                  if (!ehAppCentral(context)) {
+                      iniciarRastreadorGpsNativo(context.getApplicationContext());
+                      dispararSincronizacaoFirebaseNativa(context.getApplicationContext());
+                  }
+                  new Handler(Looper.getMainLooper()).post(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              garantirMotorWebAtivo(context);
+                              if (webViewGlobal != null) {
+                                  webViewGlobal.onResume();
+                                  webViewGlobal.resumeTimers();
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                                      webViewGlobal.evaluateJavascript("try { if (typeof window.pulsoNativoSegundoPlano === 'function') { window.pulsoNativoSegundoPlano(); } } catch(e) {}", null);
+                                  } else {
+                                      webViewGlobal.loadUrl("javascript:try{if(typeof window.pulsoNativoSegundoPlano==='function'){window.pulsoNativoSegundoPlano();}}catch(e){}");
+                                  }
+                              }
+                          } catch (Throwable ignored) {}
+                      }
+                  });
+              }
+
+              private static String requisicaoHttpFirebase(String urlStr, String metodo, String jsonBody) {
+                  HttpURLConnection conn = null;
+                  try {
+                      URL url = new URL(urlStr);
+                      conn = (HttpURLConnection) url.openConnection();
+                      conn.setConnectTimeout(6000);
+                      conn.setReadTimeout(6000);
+                      conn.setRequestMethod(metodo);
+                      conn.setRequestProperty("Accept", "application/json");
+                      if (jsonBody != null) {
+                          conn.setDoOutput(true);
+                          conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                          byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+                          OutputStream os = conn.getOutputStream();
+                          os.write(bytes);
+                          os.flush();
+                          os.close();
+                      }
+                      int code = conn.getResponseCode();
+                      InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+                      if (is == null) return null;
+                      BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+                      StringBuilder sb = new StringBuilder();
+                      String linha;
+                      while ((linha = br.readLine()) != null) {
+                          sb.append(linha);
+                      }
+                      br.close();
+                      return (code >= 200 && code < 300) ? sb.toString() : null;
+                  } catch (Throwable e) {
+                      return null;
+                  } finally {
+                      if (conn != null) {
+                          try { conn.disconnect(); } catch (Throwable ignored) {}
+                      }
+                  }
+              }
+
+              public static void aplicarFirewallNativo(Context context, boolean bloquearGeral, JSONObject mapaAppsBloq) {
+                  try {
+                      FirewallVpnService.bloqueioGeralAtivo = bloquearGeral;
+                      synchronized (FirewallVpnService.listaAppsBloqueados) {
+                          FirewallVpnService.listaAppsBloqueados.clear();
+                          if (mapaAppsBloq != null) {
+                              Iterator<String> keys = mapaAppsBloq.keys();
+                              while (keys.hasNext()) {
+                                  String pkg = keys.next();
+                                  if (pkg != null && !pkg.isEmpty() && mapaAppsBloq.optBoolean(pkg, false)) {
+                                      FirewallVpnService.listaAppsBloqueados.add(pkg);
+                                  }
+                              }
+                          }
+                      }
+
+                      boolean precisaAtivar = bloquearGeral || !FirewallVpnService.listaAppsBloqueados.isEmpty();
+                      if (!precisaAtivar) {
+                          Intent stopIntent = new Intent(context, FirewallVpnService.class);
+                          stopIntent.setAction("PARAR");
+                          context.startService(stopIntent);
+                          return;
+                      }
+
+                      Intent prepareIntent = VpnService.prepare(context);
+                      if (prepareIntent != null) {
+                          if (instanciaAtiva != null) {
+                              instanciaAtiva.startActivityForResult(prepareIntent, REQ_VPN);
+                          }
+                      } else {
+                          Intent startIntent = new Intent(context, FirewallVpnService.class);
+                          startIntent.setAction("ATUALIZAR");
+                          context.startService(startIntent);
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              public static void dispararSincronizacaoFirebaseNativa(final Context context) {
+                  if (ehAppCentral(context)) return;
+                  executorFirebaseNativo.execute(new Runnable() {
+                      @Override
+                      public void run() {
+                          executarCicloFirebaseNativo(context.getApplicationContext());
+                      }
+                  });
+              }
+
+              private static void executarCicloFirebaseNativo(Context appCtx) {
+                  try {
+                      SharedPreferences prefs = getPrefs(appCtx);
+                      String deviceId = obterOuCriarDeviceId(appCtx);
+                      String nomeAparelho = obterOuCriarNomeAparelho(appCtx);
+
+                      double planoGB = Double.parseDouble(prefs.getString("planoGB", "0"));
+                      int diaCiclo = Integer.parseInt(prefs.getString("diaCiclo", "1"));
+                      double offsetZeroGB = Double.parseDouble(prefs.getString("offsetZeroGB", "0"));
+                      boolean firewallGeral = "true".equals(prefs.getString("firewallGeral_v7", "false"));
+                      String appsBloqStr = prefs.getString("appsBloqueados_v7", "{}");
+                      JSONObject appsBloqJson;
+                      try { appsBloqJson = new JSONObject(appsBloqStr); } catch (Throwable e) { appsBloqJson = new JSONObject(); }
+
+                      long ultimoCmdTs = Long.parseLong(prefs.getString("ultimoCmdTs_v9", "0"));
+                      long ultimoZerarTs = Long.parseLong(prefs.getString("ultimoZerarTs_v9", "0"));
+                      double consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
+
+                      boolean mudouFirewall = false;
+                      boolean mudouConfig = false;
+
+                      // 1. Ler configuracoes persistentes do Firebase (/frota/config/{deviceId}.json)
+                      String respCfg = requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
+                      if (respCfg != null && !respCfg.equals("null") && respCfg.startsWith("{")) {
+                          JSONObject cfg = new JSONObject(respCfg);
+                          SharedPreferences.Editor ed = prefs.edit();
+
+                          if (cfg.has("nome")) {
+                              String novoNome = cfg.optString("nome", "").trim();
+                              if (!novoNome.isEmpty() && !novoNome.equals(nomeAparelho)) {
+                                  nomeAparelho = novoNome;
+                                  ed.putString("nomeAparelho_v6", nomeAparelho);
+                                  mudouConfig = true;
+                              }
+                          }
+                          if (cfg.has("planoGB")) {
+                              double novoPlano = cfg.optDouble("planoGB", 0);
+                              if (novoPlano != planoGB) {
+                                  planoGB = novoPlano;
+                                  ed.putString("planoGB", String.valueOf(planoGB));
+                                  mudouConfig = true;
+                              }
+                          }
+                          if (cfg.has("diaCiclo")) {
+                              int novoDia = Math.max(1, Math.min(28, cfg.optInt("diaCiclo", 1)));
+                              if (novoDia != diaCiclo) {
+                                  diaCiclo = novoDia;
+                                  ed.putString("diaCiclo", String.valueOf(diaCiclo));
+                                  consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
+                                  mudouConfig = true;
+                              }
+                          }
+                          if (cfg.has("dadosDesligados")) {
+                              boolean novoFw = cfg.optBoolean("dadosDesligados", false);
+                              if (novoFw != firewallGeral) {
+                                  firewallGeral = novoFw;
+                                  ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
+                                  mudouFirewall = true;
+                              }
+                          }
+                          if (cfg.has("appsBloqueadosMap")) {
+                              JSONObject novoMapa = cfg.optJSONObject("appsBloqueadosMap");
+                              if (novoMapa == null) novoMapa = new JSONObject();
+                              if (!novoMapa.toString().equals(appsBloqJson.toString())) {
+                                  appsBloqJson = novoMapa;
+                                  ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                  mudouFirewall = true;
+                              }
+                          }
+                          long zerarTsNuvem = cfg.optLong("zerarTimestamp", 0);
+                          if (zerarTsNuvem > ultimoZerarTs) {
+                              ultimoZerarTs = zerarTsNuvem;
+                              offsetZeroGB = consumoBrutoAtual;
+                              ed.putString("ultimoZerarTs_v9", String.valueOf(ultimoZerarTs));
+                              ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
+                              mudouConfig = true;
+                          }
+                          ed.apply();
+                      }
+
+                      // 2. Ler comandos diretos do Firebase (/frota/comandos/{deviceId}.json)
+                      String respCmd = requisicaoHttpFirebase(FIREBASE_URL + "/frota/comandos/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
+                      if (respCmd != null && !respCmd.equals("null") && respCmd.startsWith("{")) {
+                          JSONObject cmd = new JSONObject(respCmd);
+                          long tsCmd = cmd.optLong("timestamp", 0);
+                          if (tsCmd > ultimoCmdTs) {
+                              ultimoCmdTs = tsCmd;
+                              SharedPreferences.Editor ed = prefs.edit();
+                              ed.putString("ultimoCmdTs_v9", String.valueOf(ultimoCmdTs));
+
+                              String acao = cmd.optString("acao", "");
+                              if ("FIREWALL_GERAL".equals(acao) || "DESLIGAR_DADOS".equals(acao) || "RELIGAR_DADOS".equals(acao)) {
+                                  firewallGeral = "DESLIGAR_DADOS".equals(acao) || cmd.optBoolean("bloquear", false);
+                                  ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
+                                  mudouFirewall = true;
+                              } else if ("FIREWALL_APP".equals(acao)) {
+                                  String pct = cmd.optString("pacote", "");
+                                  if (!pct.isEmpty()) {
+                                      if (cmd.optBoolean("bloquear", false)) {
+                                          appsBloqJson.put(pct, true);
+                                      } else {
+                                          appsBloqJson.remove(pct);
+                                      }
+                                      ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                      mudouFirewall = true;
+                                  }
+                              } else if ("CONFIG_PLANO".equals(acao)) {
+                                  if (cmd.has("planoGB")) {
+                                      planoGB = cmd.optDouble("planoGB", 0);
+                                      ed.putString("planoGB", String.valueOf(planoGB));
+                                  }
+                                  if (cmd.has("diaCiclo")) {
+                                      diaCiclo = Math.max(1, Math.min(28, cmd.optInt("diaCiclo", 1)));
+                                      ed.putString("diaCiclo", String.valueOf(diaCiclo));
+                                      consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
+                                  }
+                                  mudouConfig = true;
+                              } else if ("RENOMEAR_APARELHO".equals(acao)) {
+                                  String nNome = cmd.optString("novoNome", "").trim();
+                                  if (!nNome.isEmpty()) {
+                                      nomeAparelho = nNome;
+                                      ed.putString("nomeAparelho_v6", nomeAparelho);
+                                      mudouConfig = true;
+                                  }
+                              } else if ("ZERAR_CONTADOR".equals(acao)) {
+                                  offsetZeroGB = consumoBrutoAtual;
+                                  ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
+                                  mudouConfig = true;
+                              }
+                              ed.apply();
+                          }
+                      }
+
+                      if (mudouFirewall) {
+                          aplicarFirewallNativo(appCtx, firewallGeral, appsBloqJson);
+                      }
+
+                      // 3. Medir latencia rapida
+                      try {
+                          long t0 = System.currentTimeMillis();
+                          HttpURLConnection pingConn = (HttpURLConnection) new URL("https://www.google.com/generate_204").openConnection();
+                          pingConn.setConnectTimeout(2500);
+                          pingConn.setReadTimeout(2500);
+                          pingConn.setRequestMethod("HEAD");
+                          pingConn.getResponseCode();
+                          ultimaLatenciaMs = (int) (System.currentTimeMillis() - t0);
+                          pingConn.disconnect();
+                      } catch (Throwable ignored) {}
+
+                      double consumoLiquido = Math.max(0.0, consumoBrutoAtual - offsetZeroGB);
+                      String redeAtiva = obterTipoRedeStatic(appCtx);
+                      double velMbps = firewallGeral ? 0.0 : obterVelocidadeMbpsStatic();
+
+                      String operadora = "Rede Movel";
+                      try {
+                          TelephonyManager tm = (TelephonyManager) appCtx.getSystemService(Context.TELEPHONY_SERVICE);
+                          if (tm != null && tm.getNetworkOperatorName() != null && !tm.getNetworkOperatorName().isEmpty()) {
+                              operadora = tm.getNetworkOperatorName();
+                          }
+                      } catch (Throwable ignored) {}
+
+                      // 4. Coletar coordenada mais precisa disponivel (sem arredondar!)
+                      try {
+                          if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                                  appCtx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                  appCtx.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                              LocationManager lm = (LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
+                              if (lm != null) {
+                                  Location locG = null;
+                                  Location locN = null;
+                                  try { locG = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Throwable ignored) {}
+                                  try { locN = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER); } catch (Throwable ignored) {}
+                                  if (locG != null) {
+                                      registrarCoordenadaPrecisa(appCtx, locG.getLatitude(), locG.getLongitude(), locG.getAccuracy());
+                                  } else if (locN != null) {
+                                      registrarCoordenadaPrecisa(appCtx, locN.getLatitude(), locN.getLongitude(), locN.getAccuracy());
+                                  }
+                              }
+                          }
+                      } catch (Throwable ignored) {}
+
+                      double latExata = melhorLat;
+                      double lonExata = melhorLon;
+
+                      if (latExata != 0.0 || lonExata != 0.0) {
+                          atualizarCidadeEEnderecoPorCoordenada(appCtx, latExata, lonExata);
+                      }
+
+                      String cidadeReal = !cidadeDetectadaCache.isEmpty() ? cidadeDetectadaCache : "Localizando GPS...";
+                      String enderecoReal = !enderecoDetectadoCache.isEmpty() ? enderecoDetectadoCache : cidadeReal;
+
+                      JSONArray todosApps = obterAppsInstaladosArrayStatic(appCtx, diaCiclo, firewallGeral, appsBloqJson);
+                      JSONArray topApps = new JSONArray();
+                      int limiteApps = Math.min(todosApps.length(), 15);
+                      for (int i = 0; i < limiteApps; i++) {
+                          topApps.put(todosApps.getJSONObject(i));
+                      }
+
+                      // Mantem 7 casas decimais (precisao de ~1 centimetro no Google Maps)
+                      double lat7 = Math.round(latExata * 10000000.0) / 10000000.0;
+                      double lon7 = Math.round(lonExata * 10000000.0) / 10000000.0;
+
+                      JSONObject pacote = new JSONObject();
+                      pacote.put("deviceId", deviceId);
+                      pacote.put("nome", nomeAparelho);
+                      pacote.put("timestamp", System.currentTimeMillis());
+                      pacote.put("consumoGB", Math.round(consumoLiquido * 100.0) / 100.0);
+                      pacote.put("planoGB", planoGB);
+                      pacote.put("diaCiclo", diaCiclo);
+                      pacote.put("rede", firewallGeral ? "🛡️ Apps Bloqueados" : redeAtiva);
+                      pacote.put("dadosDesligados", firewallGeral);
+                      pacote.put("appsBloqueadosMap", appsBloqJson);
+                      pacote.put("velocidade", Math.round(velMbps * 10.0) / 10.0);
+                      pacote.put("latencia", firewallGeral ? 0 : ultimaLatenciaMs);
+                      pacote.put("cidade", cidadeReal);
+                      pacote.put("endereco", enderecoReal);
+                      pacote.put("precisaoMetros", Math.round(melhorPrecisaoMetros));
+                      pacote.put("operadora", operadora);
+                      pacote.put("lat", lat7);
+                      pacote.put("lon", lon7);
+                      pacote.put("apps", topApps);
+
+                      // 5. Gravar estado diretamente no Firebase via Java Nativo
+                      requisicaoHttpFirebase(FIREBASE_URL + "/frota/aparelhos/" + Uri.encode(deviceId) + ".json", "PUT", pacote.toString());
+
+                      if (mudouFirewall || mudouConfig) {
+                          new Handler(Looper.getMainLooper()).post(new Runnable() {
+                              @Override
+                              public void run() {
+                                  if (webViewGlobal != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                                      webViewGlobal.evaluateJavascript("try { if (typeof window.recarregarMemoriaNativa === 'function') { window.recarregarMemoriaNativa(); } } catch(e) {}", null);
+                                  }
+                              }
+                          });
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              public static void iniciarServico24h(Context context) {
+                  try {
+                      Intent srv = new Intent(context, MonitorSempreAtivoService.class);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          context.startForegroundService(srv);
+                      } else {
+                          context.startService(srv);
+                      }
+                  } catch (Throwable ignored) {
+                      try {
+                          context.startService(new Intent(context, MonitorSempreAtivoService.class));
+                      } catch (Throwable ignored2) {}
+                  }
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  instanciaAtiva = this;
+
+                  garantirMotorWebAtivo(this);
+                  if (contextWrapperGlobal != null) {
+                      contextWrapperGlobal.setBaseContext(this);
+                  }
+                  if (webViewGlobal.getParent() != null) {
+                      ((ViewGroup) webViewGlobal.getParent()).removeView(webViewGlobal);
+                  }
+                  setContentView(webViewGlobal);
+
+                  iniciarServico24h(this);
+                  solicitarPermissoesIniciais();
+                  iniciarRastreadorGpsNativo(this);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  instanciaAtiva = this;
+                  if (contextWrapperGlobal != null) {
+                      contextWrapperGlobal.setBaseContext(this);
+                  }
+                  if (webViewGlobal != null) {
+                      webViewGlobal.onResume();
+                      webViewGlobal.resumeTimers();
+                  }
+                  acionarPulsoWebView(this);
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  if (webViewGlobal != null) {
+                      webViewGlobal.onResume();
+                      webViewGlobal.resumeTimers();
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webViewGlobal != null && webViewGlobal.canGoBack()) {
+                      webViewGlobal.goBack();
+                      return;
+                  }
+                  moveTaskToBack(true);
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (contextWrapperGlobal != null) {
+                      contextWrapperGlobal.setBaseContext(getApplicationContext());
+                  }
+                  if (webViewGlobal != null && webViewGlobal.getParent() != null) {
+                      ((ViewGroup) webViewGlobal.getParent()).removeView(webViewGlobal);
+                  }
+                  if (instanciaAtiva == this) {
+                      instanciaAtiva = null;
+                  }
+                  super.onDestroy();
+              }
+
+              private void solicitarPermissoesIniciais() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          List<String> permissoes = new ArrayList<>();
+                          if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                              permissoes.add(Manifest.permission.ACCESS_FINE_LOCATION);
+                          }
+                          if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                              permissoes.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+                          }
+                          if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+                              permissoes.add(Manifest.permission.READ_PHONE_STATE);
+                          }
+                          if (Build.VERSION.SDK_INT >= 33) {
+                              if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                                  permissoes.add("android.permission.POST_NOTIFICATIONS");
+                              }
+                          }
+                          if (!permissoes.isEmpty()) {
+                              requestPermissions(permissoes.toArray(new String[0]), REQ_PERMISSOES);
+                          }
+
+                          PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                          if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                              Intent intentBat = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                              intentBat.setData(Uri.parse("package:" + getPackageName()));
+                              startActivity(intentBat);
+                          }
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  iniciarRastreadorGpsNativo(this);
+                  acionarPulsoWebView(this);
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == REQ_VPN && resultCode == RESULT_OK) {
+                      if (FirewallVpnService.bloqueioGeralAtivo || !FirewallVpnService.listaAppsBloqueados.isEmpty()) {
+                          try {
+                              Intent serviceIntent = new Intent(this, FirewallVpnService.class);
+                              serviceIntent.setAction("ATUALIZAR");
+                              startService(serviceIntent);
+                          } catch (Throwable ignored) {}
+                      }
+                  }
+              }
+
+              private static long calcularInicioCiclo(int diaRenovacao) {
+                  Calendar cal = Calendar.getInstance();
+                  int diaAtual = cal.get(Calendar.DAY_OF_MONTH);
+                  int diaAjustado = Math.max(1, Math.min(28, diaRenovacao));
+                  if (diaAtual < diaAjustado) { cal.add(Calendar.MONTH, -1); }
+                  cal.set(Calendar.DAY_OF_MONTH, diaAjustado);
+                  cal.set(Calendar.HOUR_OF_DAY, 0);
+                  cal.set(Calendar.MINUTE, 0);
+                  cal.set(Calendar.SECOND, 0);
+                  cal.set(Calendar.MILLISECOND, 0);
+                  return cal.getTimeInMillis();
+              }
+
+              public static boolean temPermissaoUsoStatic(Context context) {
+                  try {
+                      AppOpsManager appOps = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+                      if (appOps == null) return false;
+                      int mode = appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.getPackageName());
+                      return mode == AppOpsManager.MODE_ALLOWED;
+                  } catch (Throwable e) { return false; }
+              }
+
+              public static double obterConsumoTotalMesGBStatic(Context context, int diaRenovacao) {
+                  long inicio = calcularInicioCiclo(diaRenovacao);
+                  long agora = System.currentTimeMillis();
+                  long totalBytes = 0;
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && temPermissaoUsoStatic(context)) {
+                          NetworkStatsManager nsm = (NetworkStatsManager) context.getSystemService(Context.NETWORK_STATS_SERVICE);
+                          if (nsm != null) {
+                              NetworkStats.Bucket bucket = nsm.querySummaryForDevice(ConnectivityManager.TYPE_MOBILE, null, inicio, agora);
+                              if (bucket != null) { totalBytes = bucket.getRxBytes() + bucket.getTxBytes(); }
+                          }
+                      }
+                  } catch (Throwable ignored) {}
+
+                  if (totalBytes <= 0) {
+                      long rx = TrafficStats.getMobileRxBytes();
+                      long tx = TrafficStats.getMobileTxBytes();
+                      if (rx != TrafficStats.UNSUPPORTED && tx != TrafficStats.UNSUPPORTED) { totalBytes = rx + tx; }
+                  }
+                  return totalBytes / (1024.0 * 1024.0 * 1024.0);
+              }
+
+              public static String obterTipoRedeStatic(Context context) {
+                  try {
+                      ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+                      if (cm == null) return "Desconectado";
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          Network net = cm.getActiveNetwork();
+                          if (net == null) return "Dados Desligados";
+                          NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                          if (caps == null) return "Dados Desligados";
+                          if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) { return "Wi-Fi Ativo"; }
+                          else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) { return "4G/5G Movel"; }
+                      }
+                  } catch (Throwable ignored) {}
+                  return "Dados Moveis";
+              }
+
+              public static double obterVelocidadeMbpsStatic() {
+                  long agora = System.currentTimeMillis();
+                  long rxAtual = TrafficStats.getTotalRxBytes();
+                  long txAtual = TrafficStats.getTotalTxBytes();
+                  if (ultimoTempoLeitura > 0 && (agora - ultimoTempoLeitura) > 500) {
+                      long deltaBytes = (rxAtual - ultimoRxBytesTotal) + (txAtual - ultimoTxBytesTotal);
+                      double segundos = (agora - ultimoTempoLeitura) / 1000.0;
+                      if (deltaBytes >= 0 && segundos > 0) {
+                          double mbpsInstantaneo = (deltaBytes * 8.0) / (segundos * 1000000.0);
+                          if (mbpsInstantaneo > 0.05) { ultimaVelocidadeMbps = mbpsInstantaneo; }
+                      }
+                  }
+                  ultimoRxBytesTotal = rxAtual;
+                  ultimoTxBytesTotal = txAtual;
+                  ultimoTempoLeitura = agora;
+                  return Math.round(ultimaVelocidadeMbps * 100.0) / 100.0;
+              }
+
+              public static JSONArray obterAppsInstaladosArrayStatic(Context context, int diaRenovacao, boolean bloqGeral, JSONObject mapaBloq) {
+                  JSONArray listaApps = new JSONArray();
+                  try {
+                      PackageManager pm = context.getPackageManager();
+                      String redeAtual = obterTipoRedeStatic(context);
+                      List<PackageInfo> pacotes = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS);
+                      List<JSONObject> tempObjs = new ArrayList<>();
+
+                      for (PackageInfo pkg : pacotes) {
+                          ApplicationInfo appInfo = pkg.applicationInfo;
+                          if (appInfo == null) continue;
+                          boolean ehAppUsuario = (appInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0
+                                  || (appInfo.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                                  || pm.getLaunchIntentForPackage(pkg.packageName) != null;
+                          if (!ehAppUsuario) continue;
+
+                          int uid = appInfo.uid;
+                          String nomeApp = pm.getApplicationLabel(appInfo).toString();
+                          long rxUid = TrafficStats.getUidRxBytes(uid);
+                          long txUid = TrafficStats.getUidTxBytes(uid);
+                          long totalBytes = (rxUid > 0 || txUid > 0) ? (rxUid + txUid) : 0;
+
+                          boolean solicitaGeo = false;
+                          if (pkg.requestedPermissions != null) {
+                              for (String perm : pkg.requestedPermissions) {
+                                  if (Manifest.permission.ACCESS_FINE_LOCATION.equals(perm)) { solicitaGeo = true; break; }
+                              }
+                          }
+
+                          boolean estaBloq = bloqGeral || (mapaBloq != null && mapaBloq.optBoolean(pkg.packageName, false));
+                          double totalMB = totalBytes / (1024.0 * 1024.0);
+                          JSONObject obj = new JSONObject();
+                          obj.put("nome", nomeApp);
+                          obj.put("pacote", pkg.packageName);
+                          obj.put("totalMB", Math.round(totalMB * 10.0) / 10.0);
+                          obj.put("redeAtiva", estaBloq ? "🚫 Bloqueado" : ("Conectado (" + redeAtual + ")"));
+                          obj.put("emTransmissao", !estaBloq && totalMB > 0);
+                          obj.put("usaGeo", solicitaGeo);
+                          obj.put("geoAtiva", solicitaGeo);
+                          obj.put("bloqueado", estaBloq);
+                          tempObjs.add(obj);
+                      }
+
+                      Collections.sort(tempObjs, new Comparator<JSONObject>() {
+                          @Override
+                          public int compare(JSONObject a, JSONObject b) {
+                              return Double.compare(b.optDouble("totalMB", 0), a.optDouble("totalMB", 0));
+                          }
+                      });
+
+                      int limite = Math.min(tempObjs.size(), 40);
+                      for (int i = 0; i < limite; i++) { listaApps.put(tempObjs.get(i)); }
+                  } catch (Throwable ignored) {}
+                  return listaApps;
+              }
+
+              public static class BootReceiver extends BroadcastReceiver {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      iniciarServico24h(context);
+                      acionarPulsoWebView(context);
+                  }
+              }
+
+              public static class MonitorSempreAtivoService extends Service {
+                  private static final String CANAL_ID = "monitor_dados_24h";
+                  private PowerManager.WakeLock wakeLock;
+                  private WifiManager.WifiLock wifiLock;
+                  private Handler handlerPulso;
+                  private Runnable runnablePulso;
+
+                  @Override
+                  public void onCreate() {
+                      super.onCreate();
+                      iniciarNotificacaoDiscreta();
+                      ativarLocks24h();
+                      iniciarRastreadorGpsNativo(getApplicationContext());
+                      garantirMotorWebAtivo(getApplicationContext());
+                      iniciarLoopNativoSegundoPlano();
+                  }
+
+                  @Override
+                  public int onStartCommand(Intent intent, int flags, int startId) {
+                      iniciarNotificacaoDiscreta();
+                      ativarLocks24h();
+                      iniciarRastreadorGpsNativo(getApplicationContext());
+                      garantirMotorWebAtivo(getApplicationContext());
+                      iniciarLoopNativoSegundoPlano();
+                      agendarReativacaoAlarme();
+                      return START_STICKY;
+                  }
+
+                  private void iniciarLoopNativoSegundoPlano() {
+                      if (handlerPulso == null) {
+                          handlerPulso = new Handler(Looper.getMainLooper());
+                      }
+                      if (runnablePulso == null) {
+                          runnablePulso = new Runnable() {
+                              @Override
+                              public void run() {
+                                  try {
+                                      ativarLocks24h();
+                                      acionarPulsoWebView(getApplicationContext());
+                                  } catch (Throwable ignored) {}
+                                  if (handlerPulso != null) {
+                                      handlerPulso.postDelayed(this, 6000);
+                                  }
+                              }
+                          };
+                          handlerPulso.postDelayed(runnablePulso, 2000);
+                      }
+                  }
+
+                  private void agendarReativacaoAlarme() {
+                      try {
+                          AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                          if (am != null) {
+                              Intent i = new Intent(getApplicationContext(), BootReceiver.class);
+                              int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                  flags |= PendingIntent.FLAG_IMMUTABLE;
+                              }
+                              PendingIntent pi = PendingIntent.getBroadcast(getApplicationContext(), 909, i, flags);
+                              am.setRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 60000, 60000, pi);
+                          }
+                      } catch (Throwable ignored) {}
+                  }
+
+                  private void iniciarNotificacaoDiscreta() {
+                      try {
+                          NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
+                              NotificationChannel channel = new NotificationChannel(CANAL_ID, "Monitoramento 24h", NotificationManager.IMPORTANCE_LOW);
+                              channel.setShowBadge(false);
+                              nm.createNotificationChannel(channel);
+                          }
+
+                          Intent openIntent = new Intent(this, MainActivity.class);
+                          int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) { flags |= PendingIntent.FLAG_IMMUTABLE; }
+                          PendingIntent pi = PendingIntent.getActivity(this, 0, openIntent, flags);
+
+                          Notification.Builder builder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ?
+                                  new Notification.Builder(this, CANAL_ID) : new Notification.Builder(this);
+
+                          Notification notif = builder
+                                  .setContentTitle("Sistema de Dados Ativo")
+                                  .setContentText("Sincronizado via Firebase 24h")
+                                  .setSmallIcon(android.R.drawable.ic_dialog_info)
+                                  .setContentIntent(pi)
+                                  .setOngoing(true)
+                                  .build();
+
+                          startForeground(1001, notif);
+                      } catch (Throwable ignored) {}
+                  }
+
+                  private void ativarLocks24h() {
+                      try {
+                          PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                          if (pm != null) {
+                              if (wakeLock == null) {
+                                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MonitorDados::SempreAtivoLock");
+                                  wakeLock.setReferenceCounted(false);
+                              }
+                              if (!wakeLock.isHeld()) {
+                                  wakeLock.acquire();
+                              }
+                          }
+                      } catch (Throwable ignored) {}
+
+                      try {
+                          WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                          if (wm != null) {
+                              if (wifiLock == null) {
+                                  wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "MonitorDados::WifiSempreAtivo");
+                                  wifiLock.setReferenceCounted(false);
+                              }
+                              if (!wifiLock.isHeld()) {
+                                  wifiLock.acquire();
+                              }
+                          }
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @Override
+                  public void onTaskRemoved(Intent rootIntent) {
+                      agendarReativacaoAlarme();
+                      iniciarServico24h(getApplicationContext());
+                      super.onTaskRemoved(rootIntent);
+                  }
+
+                  @Override
+                  public void onDestroy() {
+                      agendarReativacaoAlarme();
+                      iniciarServico24h(getApplicationContext());
+                      super.onDestroy();
+                  }
+
+                  @Override
+                  public IBinder onBind(Intent intent) { return null; }
+              }
+
+              public static class FirewallVpnService extends VpnService {
+                  private static ParcelFileDescriptor vpnInterface = null;
+                  public static volatile boolean bloqueioGeralAtivo = false;
+                  public static final List<String> listaAppsBloqueados = new ArrayList<>();
+
+                  @Override
+                  public int onStartCommand(Intent intent, int flags, int startId) {
+                      if (intent != null && "PARAR".equals(intent.getAction())) {
+                          fecharTunel();
+                          stopSelf();
+                          return START_NOT_STICKY;
+                      }
+                      aplicarRegrasVpn();
+                      return START_STICKY;
+                  }
+
+                  private synchronized void aplicarRegrasVpn() {
+                      fecharTunel();
+                      if (!bloqueioGeralAtivo && listaAppsBloqueados.isEmpty()) {
+                          stopSelf();
+                          return;
+                      }
+                      try {
+                          Builder builder = new Builder();
+                          builder.setSession("Firewall Central Monitor");
+                          builder.setMtu(1500);
+                          builder.addAddress("10.111.222.1", 32);
+                          builder.addRoute("0.0.0.0", 0);
+                          builder.addDnsServer("10.111.222.2");
+
+                          try {
+                              builder.addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128);
+                              builder.addRoute("::", 0);
+                          } catch (Throwable ignored) {}
+
+                          if (bloqueioGeralAtivo) {
+                              try { builder.addDisallowedApplication(getPackageName()); } catch (Throwable ignored) {}
+                          } else {
+                              int adicionados = 0;
+                              for (String pkg : listaAppsBloqueados) {
+                                  if (pkg != null && !pkg.trim().isEmpty() && !pkg.equals(getPackageName())) {
+                                      try { builder.addAllowedApplication(pkg.trim()); adicionados++; } catch (Throwable ignored) {}
+                                  }
+                              }
+                              if (adicionados == 0) { stopSelf(); return; }
+                          }
+                          vpnInterface = builder.establish();
+                      } catch (Throwable e) { fecharTunel(); }
+                  }
+
+                  private synchronized void fecharTunel() {
+                      if (vpnInterface != null) {
+                          try { vpnInterface.close(); } catch (IOException ignored) {}
+                          vpnInterface = null;
+                      }
+                  }
+
+                  @Override
+                  public void onDestroy() {
+                      fecharTunel();
+                      super.onDestroy();
+                  }
+              }
+
+              public static class PonteMonitorDados {
+                  private final Context context;
+
+                  public PonteMonitorDados(Context context) {
+                      this.context = context.getApplicationContext();
+                  }
+
+                  @JavascriptInterface
+                  public String lerPreferencia(String chave, String padrao) {
+                      try {
+                          if ("deviceId_v6".equals(chave)) return obterOuCriarDeviceId(context);
+                          if ("nomeAparelho_v6".equals(chave)) return obterOuCriarNomeAparelho(context);
+                          String val = getPrefs(context).getString(chave, null);
+                          return val != null ? val : padrao;
+                      } catch (Throwable e) {
+                          return padrao;
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public void salvarPreferencia(String chave, String valor) {
+                      try {
+                          getPrefs(context).edit().putString(chave, valor != null ? valor : "").apply();
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public void reportarGpsAltaPrecisao(double lat, double lon, float precisao) {
+                      registrarCoordenadaPrecisa(context, lat, lon, precisao);
+                  }
+
+                  @JavascriptInterface
+                  public void forcarSincronizacaoNativa() {
+                      dispararSincronizacaoFirebaseNativa(context);
+                  }
+
+                  @JavascriptInterface
+                  public void abrirMapaNativo(double lat, double lon, String rotulo) {
+                      String coordExata = String.format(Locale.US, "%.7f,%.7f", lat, lon);
+                      try {
+                          String labelLimpo = (rotulo != null && !rotulo.isEmpty()) ? Uri.encode(rotulo) : "Aparelho";
+                          Uri geoUri = Uri.parse("geo:0,0?q=" + coordExata + "(" + labelLimpo + ")&z=19");
+                          Intent mapIntent = new Intent(Intent.ACTION_VIEW, geoUri);
+                          mapIntent.setPackage("com.google.android.apps.maps");
+                          mapIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          if (mapIntent.resolveActivity(context.getPackageManager()) != null) {
+                              context.startActivity(mapIntent);
+                              return;
+                          }
+                      } catch (Throwable ignored) {}
+
+                      try {
+                          Uri webUri = Uri.parse("https://www.google.com/maps/search/?api=1&query=" + coordExata);
+                          Intent webIntent = new Intent(Intent.ACTION_VIEW, webUri);
+                          webIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          context.startActivity(webIntent);
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public boolean temPermissaoUso() {
+                      return temPermissaoUsoStatic(context);
+                  }
+
+                  @JavascriptInterface
+                  public void solicitarPermissaoUso() {
+                      try {
+                          Intent intent = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
+                          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          context.startActivity(intent);
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public boolean temPermissaoVpn() {
+                      try { return VpnService.prepare(context) == null; } catch (Throwable e) { return false; }
+                  }
+
+                  @JavascriptInterface
+                  public void solicitarPermissaoVpn() {
+                      try {
+                          if (instanciaAtiva != null) {
+                              Intent vpnIntent = VpnService.prepare(instanciaAtiva);
+                              if (vpnIntent != null) { instanciaAtiva.startActivityForResult(vpnIntent, REQ_VPN); }
+                          }
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public void sincronizarFirewallVpn(boolean bloquearGeral, String pacotesJsonArray) {
+                      try {
+                          JSONObject mapa = new JSONObject();
+                          if (pacotesJsonArray != null && !pacotesJsonArray.isEmpty()) {
+                              JSONArray arr = new JSONArray(pacotesJsonArray);
+                              for (int i = 0; i < arr.length(); i++) {
+                                  String pkg = arr.optString(i, "");
+                                  if (!pkg.isEmpty()) mapa.put(pkg, true);
+                              }
+                          }
+                          aplicarFirewallNativo(context, bloquearGeral, mapa);
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public double obterConsumoTotalMesGB(int diaRenovacao) {
+                      return obterConsumoTotalMesGBStatic(context, diaRenovacao);
+                  }
+
+                  @JavascriptInterface
+                  public String obterTipoRede() {
+                      return obterTipoRedeStatic(context);
+                  }
+
+                  @JavascriptInterface
+                  public String obterInfoRedeEGeoJSON() {
+                      JSONObject json = new JSONObject();
+                      try {
+                          String redeAtiva = obterTipoRedeStatic(context);
+                          String operadora = "Rede Movel";
+                          TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+                          if (tm != null && tm.getNetworkOperatorName() != null && !tm.getNetworkOperatorName().isEmpty()) {
+                              operadora = tm.getNetworkOperatorName();
+                          }
+                          json.put("redeAtiva", redeAtiva);
+                          json.put("operadora", operadora);
+                          json.put("latitude", melhorLat);
+                          json.put("longitude", melhorLon);
+                          json.put("cidade", cidadeDetectadaCache);
+                          json.put("endereco", enderecoDetectadoCache);
+                      } catch (Throwable ignored) {}
+                      return json.toString();
+                  }
+
+                  @JavascriptInterface
+                  public String obterAppsInstaladosJSON(int diaRenovacao) {
+                      boolean fwGeral = "true".equals(getPrefs(context).getString("firewallGeral_v7", "false"));
+                      JSONObject mapaBloq;
+                      try { mapaBloq = new JSONObject(getPrefs(context).getString("appsBloqueados_v7", "{}")); }
+                      catch (Throwable e) { mapaBloq = new JSONObject(); }
+                      return obterAppsInstaladosArrayStatic(context, diaRenovacao, fwGeral, mapaBloq).toString();
+                  }
+
+                  @JavascriptInterface
+                  public double obterVelocidadeMbps() {
+                      return obterVelocidadeMbpsStatic();
+                  }
+
+                  @JavascriptInterface
+                  public int obterLatenciaMs() { return ultimaLatenciaMs; }
+
+                  @JavascriptInterface
+                  public void dispararMedicaoEmSegundoPlano() {
+                      new Thread(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  long t0 = System.currentTimeMillis();
+                                  HttpURLConnection conn = (HttpURLConnection) new URL("https://www.google.com/generate_204").openConnection();
+                                  conn.setConnectTimeout(3000);
+                                  conn.setReadTimeout(3000);
+                                  conn.setRequestMethod("HEAD");
+                                  conn.getResponseCode();
+                                  long t1 = System.currentTimeMillis();
+                                  ultimaLatenciaMs = (int) (t1 - t0);
+                                  conn.disconnect();
+                              } catch (Throwable e) { ultimaLatenciaMs = 0; }
+                          }
+                      }).start();
+                  }
+              }
+          }
+          EOF
+
+          # ===================================================================
+          # 3. INDEX.HTML COMPLETO (APP 1 - MONITOR: 100% FIREBASE + GPS CONTINUO)
+          # ===================================================================
+          cat << 'EOF' > app/src/main/assets/index.html
+          <!DOCTYPE html>
+          <html lang="pt-BR">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>Monitor de Dados Moveis</title>
+            <style>
+              :root {
+                --bg: #0b1120; --card: #151f32; --card-dark: #0f172a; --border: #263554;
+                --primary: #38bdf8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+                --text: #f8fafc; --muted: #94a3b8;
+              }
+              * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+              body { background: var(--bg); color: var(--text); padding: 12px; padding-bottom: 40px; }
+              .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
+              .header h1 { font-size: 1.1rem; color: var(--primary); }
+              .header-sub { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+              .badge-rede { background: rgba(34,197,94,0.18); color: var(--success); border: 1px solid var(--success); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+              .badge-rede.off { background: rgba(239,68,68,0.22); color: #f87171; border-color: var(--danger); }
+              .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+              .card-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+              .consumo-valor { font-size: 2rem; font-weight: 800; margin: 4px 0; }
+              .sub-info { font-size: 0.82rem; color: var(--muted); line-height: 1.4; }
+              .progress-bar { width: 100%; height: 11px; background: var(--card-dark); border-radius: 999px; overflow: hidden; margin: 10px 0; border: 1px solid var(--border); }
+              .progress-fill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--primary), var(--success)); transition: width 0.4s ease; }
+              .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+              .planos-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; margin-bottom: 10px; }
+              .plano-chip { padding: 10px 6px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-dark); color: var(--muted); font-size: 0.82rem; font-weight: 700; text-align: center; margin-top: 0; opacity: 0.55; pointer-events: none; user-select: none; }
+              .plano-chip.ativo { background: rgba(56,189,248,0.22); color: var(--primary); border-color: var(--primary); opacity: 1; }
+              .metric-box { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+              .metric-label { font-size: 0.72rem; color: var(--muted); }
+              .metric-val { font-size: 1rem; font-weight: 700; margin-top: 3px; color: var(--text); }
+              input, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-dark); color: var(--text); font-size: 0.88rem; margin-top: 6px; }
+              button { background: var(--primary); color: #082f49; font-weight: 700; border: none; cursor: pointer; }
+              button.btn-sec { background: #1e293b; color: var(--text); border: 1px solid var(--border); }
+              button.btn-warn { background: rgba(245,158,11,0.2); color: var(--warning); border: 1px solid var(--warning); }
+              .filtros-apps { display: flex; gap: 6px; margin-bottom: 10px; overflow-x: auto; }
+              .filtro-btn { width: auto; padding: 6px 12px; font-size: 0.75rem; border-radius: 999px; background: var(--card-dark); color: var(--muted); border: 1px solid var(--border); margin-top: 0; white-space: nowrap; }
+              .filtro-btn.ativo { background: var(--primary); color: #082f49; border-color: var(--primary); }
+              .app-list { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; }
+              .app-item { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+              .app-item.app-bloqueado { border-color: var(--danger); background: rgba(239,68,68,0.08); }
+              .app-main { flex: 1; min-width: 0; }
+              .app-nome { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .app-pkg { font-size: 0.7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .app-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+              .tag { font-size: 0.68rem; padding: 2px 7px; border-radius: 6px; font-weight: 600; display: inline-block; }
+              .tag-net-on { background: rgba(34,197,94,0.2); color: #4ade80; }
+              .tag-net-idle { background: rgba(56,189,248,0.15); color: #38bdf8; }
+              .tag-net-block { background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid var(--danger); }
+              .tag-lock { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.4); font-size: 0.7rem; padding: 3px 8px; border-radius: 999px; font-weight: 700; }
+              .app-consumo { text-align: right; font-weight: 800; font-size: 0.92rem; color: var(--primary); white-space: nowrap; }
+              .alerta-box { display: none; padding: 10px; border-radius: 10px; margin-bottom: 12px; font-size: 0.85rem; font-weight: 600; }
+              .banner-firewall { display: none; background: rgba(239, 68, 68, 0.18); border: 1px solid var(--danger); color: #f87171; padding: 12px; border-radius: 12px; margin-bottom: 12px; font-size: 0.84rem; line-height: 1.4; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <div>
+                <h1>📊 Monitor de Dados</h1>
+                <div class="header-sub" id="statusNuvemTopo">🔥 Firebase 24h Ativo...</div>
+              </div>
+              <span id="badgeRedeTopo" class="badge-rede">🟢 4G/5G Ativo</span>
+            </div>
+
+            <div id="bannerFirewall" class="banner-firewall">
+              <strong>🛡️ Firewall da Central Ativo:</strong>
+              <span id="textoBannerFirewall">O acesso a internet dos aplicativos foi bloqueado remotamente pela Central.</span>
+            </div>
+
+            <div id="boxPermissao" class="card" style="display:none; border-color: var(--warning);">
+              <div class="card-title" style="color: var(--warning);">⚠️ Permissoes do Sistema</div>
+              <p class="sub-info" style="margin-bottom: 8px;">Ative o Acesso ao Uso e a Chave de Firewall para sincronizacao completa.</p>
+              <button id="btnPermUso" class="btn-warn" onclick="abrirPermissaoUso()">1. Liberar Acesso ao Uso no Android</button>
+              <button id="btnPermVpn" class="btn-sec" onclick="abrirPermissaoVpn()" style="margin-top:6px;">2. Autorizar Chave de Firewall (VPN)</button>
+            </div>
+
+            <div id="alertaFranquia" class="alerta-box"></div>
+
+            <div class="card">
+              <div class="card-title">
+                <span>Consumo no Ciclo Atual</span>
+                <span id="labelPlanoAtivo">♾️ Plano Ilimitado</span>
+              </div>
+              <div class="consumo-valor" id="valorConsumoGB">0.00 GB</div>
+              <div class="sub-info" id="textoStatusFranquia">Modo Ilimitado ativo — Uso livre sem bloqueio</div>
+              <div class="progress-bar"><div class="progress-fill" id="barraProgresso"></div></div>
+              <div class="grid-2" style="margin-top: 10px;">
+                <div class="metric-box">
+                  <div class="metric-label">Velocidade Real</div>
+                  <div class="metric-val" id="valVelocidade">0.00 Mbps</div>
+                </div>
+                <div class="metric-box">
+                  <div class="metric-label">Latencia (Ping)</div>
+                  <div class="metric-val" id="valLatencia">-- ms</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Geolocalizacao oculta visualmente no Monitor -->
+            <div style="display:none;" aria-hidden="true">
+              <span id="geoRedeAtiva"></span>
+              <span id="geoCidade"></span>
+              <span id="geoCoordenadas"></span>
+              <span id="geoOperadora"></span>
+            </div>
+
+            <div class="card">
+              <div class="card-title">
+                <span>📱 Consumo por Aplicativo</span>
+                <span id="contadorApps">0 apps</span>
+              </div>
+              <div class="filtros-apps">
+                <button class="filtro-btn ativo" id="f-todos" onclick="definirFiltroApps('todos')">Todos</button>
+                <button class="filtro-btn" id="f-rede" onclick="definirFiltroApps('rede')">🟢 Em Trafego</button>
+                <button class="filtro-btn" id="f-bloq" onclick="definirFiltroApps('bloq')">🚫 Bloqueados</button>
+              </div>
+              <div class="app-list" id="listaAppsContainer"><div class="sub-info">Carregando aplicativos instalados...</div></div>
+            </div>
+
+            <div class="card">
+              <div class="card-title">
+                <span>⚙️ Plano e Ciclo de Dados</span>
+                <span class="tag-lock">🔒 Travado pela Central</span>
+              </div>
+              <label class="metric-label">Franquia configurada pelo administrador:</label>
+              <div class="planos-grid">
+                <button type="button" class="plano-chip" id="btnPlano-0" disabled style="grid-column: span 2;">♾️ Ilimitado</button>
+                <button type="button" class="plano-chip" id="btnPlano-43" disabled>43 GB</button>
+                <button type="button" class="plano-chip" id="btnPlano-48" disabled>48 GB</button>
+                <button type="button" class="plano-chip" id="btnPlano-91" disabled>91 GB</button>
+                <button type="button" class="plano-chip" id="btnPlano-134" disabled>134 GB</button>
+              </div>
+              <div class="grid-2" style="margin-top: 8px;">
+                <div class="metric-box">
+                  <div class="metric-label">Renovacao do Ciclo</div>
+                  <div class="metric-val" id="txtDiaCicloTravado">Todo dia 1</div>
+                </div>
+                <div class="metric-box">
+                  <div class="metric-label">Modo de Controle</div>
+                  <div class="metric-val" style="font-size:0.85rem; color:var(--warning);">🔒 Somente Leitura</div>
+                </div>
+              </div>
+            </div>
+
+            <script>
+              var FIREBASE_URL = 'https://painel-2d29e-default-rtdb.firebaseio.com';
+
+              var memoriaSegura = {};
+              function temPonteAndroid() { return typeof window.AndroidMonitor !== 'undefined'; }
+
+              function lerDado(chave, padrao) {
+                try {
+                  if (temPonteAndroid() && window.AndroidMonitor.lerPreferencia) {
+                    var valNat = window.AndroidMonitor.lerPreferencia(chave, '');
+                    if (valNat !== null && valNat !== undefined && String(valNat) !== '') {
+                      return String(valNat);
+                    }
+                  }
+                } catch (e) {}
+                try {
+                  var val = window.localStorage.getItem(chave);
+                  if (val !== null) return val;
+                } catch (e) {}
+                return memoriaSegura[chave] !== undefined ? memoriaSegura[chave] : padrao;
+              }
+
+              function salvarDado(chave, valor) {
+                var strVal = String(valor);
+                memoriaSegura[chave] = strVal;
+                try { window.localStorage.setItem(chave, strVal); } catch (e) {}
+                try {
+                  if (temPonteAndroid() && window.AndroidMonitor.salvarPreferencia) {
+                    window.AndroidMonitor.salvarPreferencia(chave, strVal);
+                  }
+                } catch (e) {}
+              }
+
+              var planoGB = parseFloat(lerDado('planoGB', '0')) || 0;
+              var diaCiclo = parseInt(lerDado('diaCiclo', '1'), 10) || 1;
+              var offsetZeroGB = parseFloat(lerDado('offsetZeroGB', '0')) || 0;
+              var firewallGeralAtivo = lerDado('firewallGeral_v7', 'false') === 'true';
+              var appsBloqueadosMap = {};
+              try { appsBloqueadosMap = JSON.parse(lerDado('appsBloqueados_v7', '{}')) || {}; } catch (e) { appsBloqueadosMap = {}; }
+
+              var ultimoConsumoBrutoGB = 0;
+              var filtroAtualApps = 'todos';
+              var cacheApps = [];
+              var estadoLocal = { rede: '4G/5G Movel', velocidade: 24.8, latencia: 22, cidade: 'Localizando...', operadora: 'Rede Movel', lat: 0, lon: 0 };
+
+              var deviceId = lerDado('deviceId_v6', '');
+              if (!deviceId) {
+                deviceId = 'CEL-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+                salvarDado('deviceId_v6', deviceId);
+              }
+
+              function detectarModeloAparelho() {
+                var salvo = lerDado('nomeAparelho_v6', '');
+                if (salvo) return salvo;
+                var ua = navigator.userAgent || '';
+                var modelo = 'Android';
+                var matchAndroid = ua.match(/;\s*([^;)]+)\s+Build\//i);
+                if (matchAndroid && matchAndroid[1]) { modelo = matchAndroid[1].trim(); }
+                var nomeGerado = modelo + ' • ' + deviceId;
+                salvarDado('nomeAparelho_v6', nomeGerado);
+                return nomeGerado;
+              }
+
+              var nomeAparelho = detectarModeloAparelho();
+              document.getElementById('statusNuvemTopo').textContent = '🔥 Firebase 24h • ' + nomeAparelho;
+
+              window.recarregarMemoriaNativa = function() {
+                nomeAparelho = lerDado('nomeAparelho_v6', nomeAparelho);
+                planoGB = parseFloat(lerDado('planoGB', '0')) || 0;
+                diaCiclo = parseInt(lerDado('diaCiclo', '1'), 10) || 1;
+                offsetZeroGB = parseFloat(lerDado('offsetZeroGB', '0')) || 0;
+                firewallGeralAtivo = lerDado('firewallGeral_v7', 'false') === 'true';
+                try { appsBloqueadosMap = JSON.parse(lerDado('appsBloqueados_v7', '{}')) || {}; } catch (e) { appsBloqueadosMap = {}; }
+                document.getElementById('statusNuvemTopo').textContent = '🔥 Firebase 24h • ' + nomeAparelho;
+                destacarBotoesPlanoLocal();
+                atualizarInterfaceFirewall();
+                carregarAppsInstalados();
+              };
+
+              function destacarBotoesPlanoLocal() {
+                var opcoes = [0, 43, 48, 91, 134];
+                for (var i = 0; i < opcoes.length; i++) {
+                  var btn = document.getElementById('btnPlano-' + opcoes[i]);
+                  if (btn) {
+                    btn.classList.toggle('ativo', Number(planoGB) === opcoes[i]);
+                  }
+                }
+                var elDia = document.getElementById('txtDiaCicloTravado');
+                if (elDia) { elDia.textContent = 'Todo dia ' + diaCiclo; }
+              }
+
+              function abrirPermissaoUso() { if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoUso) { window.AndroidMonitor.solicitarPermissaoUso(); } }
+              function abrirPermissaoVpn() { if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoVpn) { window.AndroidMonitor.solicitarPermissaoVpn(); } }
+
+              function appEstaBloqueado(pacote) {
+                if (firewallGeralAtivo) return true;
+                return Boolean(appsBloqueadosMap[pacote]);
+              }
+
+              function atualizarInterfaceFirewall() {
+                var banner = document.getElementById('bannerFirewall');
+                var txtBanner = document.getElementById('textoBannerFirewall');
+                var badgeTopo = document.getElementById('badgeRedeTopo');
+                var pacotesBloq = Object.keys(appsBloqueadosMap).filter(function(k) { return appsBloqueadosMap[k]; });
+
+                if (temPonteAndroid() && window.AndroidMonitor.sincronizarFirewallVpn) {
+                  try { window.AndroidMonitor.sincronizarFirewallVpn(firewallGeralAtivo, JSON.stringify(pacotesBloq)); } catch (e) {}
+                }
+
+                if (firewallGeralAtivo) {
+                  banner.style.display = 'block';
+                  txtBanner.textContent = 'Todos os aplicativos deste aparelho estao com acesso a internet bloqueado pela Central.';
+                  badgeTopo.textContent = '🛡️ Apps Bloqueados';
+                  badgeTopo.classList.add('off');
+                } else if (pacotesBloq.length > 0) {
+                  banner.style.display = 'block';
+                  txtBanner.textContent = pacotesBloq.length + ' aplicativo(s) com acesso a internet bloqueado pela Central.';
+                  badgeTopo.classList.remove('off');
+                } else {
+                  banner.style.display = 'none';
+                  badgeTopo.classList.remove('off');
+                }
+                atualizarPainelLocal();
+                renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+              }
+
+              function atualizarPainelLocal() {
+                destacarBotoesPlanoLocal();
+                if (temPonteAndroid()) {
+                  try {
+                    var permitidoUso = window.AndroidMonitor.temPermissaoUso();
+                    var permitidoVpn = window.AndroidMonitor.temPermissaoVpn ? window.AndroidMonitor.temPermissaoVpn() : true;
+                    document.getElementById('boxPermissao').style.display = (permitidoUso && permitidoVpn) ? 'none' : 'block';
+                    document.getElementById('btnPermUso').style.display = permitidoUso ? 'none' : 'block';
+                    document.getElementById('btnPermVpn').style.display = permitidoVpn ? 'none' : 'block';
+
+                    ultimoConsumoBrutoGB = window.AndroidMonitor.obterConsumoTotalMesGB(diaCiclo) || 0;
+                    estadoLocal.rede = window.AndroidMonitor.obterTipoRede() || 'Dados Moveis';
+                    estadoLocal.velocidade = window.AndroidMonitor.obterVelocidadeMbps() || 0;
+                    estadoLocal.latencia = window.AndroidMonitor.obterLatenciaMs() || 0;
+                  } catch (e) {}
+                } else {
+                  if (ultimoConsumoBrutoGB === 0) {
+                    ultimoConsumoBrutoGB = parseFloat(lerDado('simConsumoGB_v6', '4.25')) || 4.25;
+                  }
+                }
+
+                var consumoLiquido = Math.max(0, ultimoConsumoBrutoGB - offsetZeroGB);
+                var velMostrada = firewallGeralAtivo ? 0 : Number(estadoLocal.velocidade);
+
+                if (!firewallGeralAtivo) { document.getElementById('badgeRedeTopo').textContent = '🟢 ' + estadoLocal.rede; }
+                document.getElementById('valorConsumoGB').textContent = consumoLiquido.toFixed(2) + ' GB';
+                document.getElementById('valVelocidade').textContent = velMostrada.toFixed(2) + ' Mbps';
+                document.getElementById('valLatencia').textContent = firewallGeralAtivo ? 'Bloqueado' : ((estadoLocal.latencia > 0 ? estadoLocal.latencia : 22) + ' ms');
+
+                var barra = document.getElementById('barraProgresso');
+                var alerta = document.getElementById('alertaFranquia');
+
+                if (planoGB === 0) {
+                  document.getElementById('labelPlanoAtivo').textContent = '♾️ Plano Ilimitado';
+                  document.getElementById('textoStatusFranquia').textContent = 'Uso Livre Ilimitado • Renovacao dia ' + diaCiclo;
+                  barra.style.width = '100%';
+                  alerta.style.display = 'none';
+                } else {
+                  var pct = Math.min(100, (consumoLiquido / planoGB) * 100);
+                  var restante = Math.max(0, planoGB - consumoLiquido);
+                  document.getElementById('labelPlanoAtivo').textContent = 'Franquia ' + planoGB + ' GB';
+                  document.getElementById('textoStatusFranquia').textContent = pct.toFixed(1) + '% usado • Restam ' + restante.toFixed(2) + ' GB (Dia ' + diaCiclo + ')';
+                  barra.style.width = pct + '%';
+                  alerta.style.display = pct >= 80 ? 'block' : 'none';
+                  alerta.style.background = pct >= 90 ? 'rgba(239,68,68,0.2)' : 'rgba(245,158,11,0.2)';
+                  alerta.style.color = pct >= 90 ? '#f87171' : '#fbbf24';
+                  alerta.textContent = pct >= 90 ? '🚨 Alerta: 90% da franquia usada!' : '⚠️ Alerta: 80% da franquia usada.';
+                }
+              }
+
+              // Rastreamento Fused Location de Alta Precisao (passa direto para o Java nativo)
+              function iniciarGpsAltaPrecisaoWebView() {
+                if (!navigator.geolocation) return;
+                try {
+                  navigator.geolocation.watchPosition(function(pos) {
+                    if (pos && pos.coords) {
+                      estadoLocal.lat = pos.coords.latitude;
+                      estadoLocal.lon = pos.coords.longitude;
+                      var acc = pos.coords.accuracy || 15;
+                      if (temPonteAndroid() && window.AndroidMonitor.reportarGpsAltaPrecisao) {
+                        window.AndroidMonitor.reportarGpsAltaPrecisao(pos.coords.latitude, pos.coords.longitude, acc);
+                      }
+                    }
+                  }, function() {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+                } catch (e) {}
+              }
+
+              function carregarAppsInstalados() {
+                if (temPonteAndroid() && window.AndroidMonitor.obterAppsInstaladosJSON) {
+                  try {
+                    var raw = window.AndroidMonitor.obterAppsInstaladosJSON(diaCiclo);
+                    cacheApps = JSON.parse(raw || '[]');
+                  } catch (e) { cacheApps = []; }
+                }
+                if (!cacheApps || cacheApps.length === 0) {
+                  cacheApps = [
+                    { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 840.5, redeAtiva: 'Transmitindo (4G)', emTransmissao: true, usaGeo: true, geoAtiva: true },
+                    { nome: 'Instagram', pacote: 'com.instagram.android', totalMB: 1250.2, redeAtiva: 'Transmitindo (4G)', emTransmissao: true, usaGeo: true, geoAtiva: true }
+                  ];
+                }
+                renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+              }
+
+              function definirFiltroApps(filtro) {
+                filtroAtualApps = filtro;
+                document.getElementById('f-todos').classList.toggle('ativo', filtro === 'todos');
+                document.getElementById('f-rede').classList.toggle('ativo', filtro === 'rede');
+                document.getElementById('f-bloq').classList.toggle('ativo', filtro === 'bloq');
+                renderizarListaApps(cacheApps, filtroAtualApps, 'listaAppsContainer', 'contadorApps');
+              }
+
+              function renderizarListaApps(listaBase, filtro, containerId, contadorId) {
+                var container = document.getElementById(containerId);
+                var filtrados = (listaBase || []).map(function(a) {
+                  var bloq = appEstaBloqueado(a.pacote);
+                  return { nome: a.nome, pacote: a.pacote, totalMB: a.totalMB, redeAtiva: bloq ? 'Internet Bloqueada' : a.redeAtiva, emTransmissao: bloq ? false : a.emTransmissao, usaGeo: a.usaGeo, geoAtiva: a.geoAtiva, bloqueado: bloq };
+                });
+
+                if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado && a.emTransmissao; }); }
+                else if (filtro === 'bloq') { filtrados = filtrados.filter(function(a) { return a.bloqueado; }); }
+
+                document.getElementById(contadorId).textContent = filtrados.length + ' apps';
+                if (filtrados.length === 0) { container.innerHTML = '<div class="sub-info">Nenhum aplicativo listado neste filtro.</div>'; return; }
+
+                container.innerHTML = filtrados.map(function(app) {
+                  var badgeRede = app.bloqueado ? '<span class="tag tag-net-block">🚫 Bloqueado</span>' : (app.emTransmissao ? '<span class="tag tag-net-on">🟢 Ativo</span>' : '<span class="tag tag-net-idle">📶 Conectado</span>');
+                  var mb = Number(app.totalMB || 0);
+                  var valorFormatado = mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+                  return '<div class="app-item ' + (app.bloqueado ? 'app-bloqueado' : '') + '">' +
+                    '<div class="app-main"><div class="app-nome">' + app.nome + '</div><div class="app-pkg">' + app.pacote + '</div><div class="app-badges">' + badgeRede + '</div></div>' +
+                    '<div class="app-consumo">' + valorFormatado + '</div></div>';
+                }).join('');
+              }
+
+              function sincronizarFirebaseAgora() {
+                if (temPonteAndroid() && window.AndroidMonitor.forcarSincronizacaoNativa) {
+                  try { window.AndroidMonitor.forcarSincronizacaoNativa(); } catch (e) {}
+                }
+              }
+
+              window.pulsoNativoSegundoPlano = function() {
+                try {
+                  window.recarregarMemoriaNativa();
+                  atualizarPainelLocal();
+                } catch (e) {}
+              };
+
+              destacarBotoesPlanoLocal();
+              carregarAppsInstalados();
+              iniciarGpsAltaPrecisaoWebView();
+              atualizarInterfaceFirewall();
+              sincronizarFirebaseAgora();
+              setInterval(atualizarPainelLocal, 3500);
+              setInterval(carregarAppsInstalados, 10000);
+            </script>
+          </body>
+          </html>
+          EOF
+
+          # ===================================================================
+          # 4. CENTRAL.HTML COMPLETO (APP 2 - 100% FIREBASE + ENDERECO REAL E MAPS 7 CASAS)
+          # ===================================================================
+          cat << 'EOF' > app/src/main/assets/central.html
+          <!DOCTYPE html>
+          <html lang="pt-BR">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>Central de Monitoramento</title>
+            <style>
+              :root {
+                --bg: #0b1120; --card: #151f32; --card-dark: #0f172a; --border: #263554;
+                --primary: #38bdf8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+                --text: #f8fafc; --muted: #94a3b8;
+              }
+              * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+              body { background: var(--bg); color: var(--text); padding: 12px; padding-bottom: 40px; }
+              .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+              .header h1 { font-size: 1.15rem; color: var(--primary); }
+              .badge-rede { background: rgba(34,197,94,0.18); color: var(--success); border: 1px solid var(--success); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+              .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+              .card-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
+              .sub-info { font-size: 0.82rem; color: var(--muted); line-height: 1.4; }
+              .grid-4 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+              .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+              .planos-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; margin-bottom: 10px; }
+              .plano-chip { padding: 10px 6px; border-radius: 8px; border: 1px solid var(--border); background: #151f32; color: var(--muted); font-size: 0.82rem; font-weight: 700; text-align: center; cursor: pointer; margin-top: 0; }
+              .plano-chip.ativo { background: var(--primary); color: #082f49; border-color: var(--primary); }
+              .ciclo-ctrl { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+              .ciclo-btn { width: 44px; padding: 10px 0; font-size: 1.05rem; font-weight: 800; margin-top: 0; background: #1e293b; color: var(--text); border: 1px solid var(--border); }
+              .metric-box { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+              .metric-label { font-size: 0.72rem; color: var(--muted); }
+              .metric-val { font-size: 1rem; font-weight: 700; margin-top: 3px; color: var(--text); }
+              input, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-dark); color: var(--text); font-size: 0.88rem; margin-top: 6px; }
+              button { font-weight: 700; cursor: pointer; }
+              button.btn-primary { background: var(--primary); color: #082f49; border: none; }
+              button.btn-sec { background: #1e293b; color: var(--text); }
+              button.btn-warn { background: rgba(245,158,11,0.2); color: #fbbf24; border: 1px solid var(--warning); }
+              button.btn-danger { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid var(--danger); }
+              button.btn-success { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid var(--success); }
+              .search-bar-wrap { position: relative; margin-bottom: 10px; }
+              .search-bar-input { width: 100%; padding: 10px 36px 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--card-dark); color: var(--text); font-size: 0.86rem; margin-top: 0; outline: none; }
+              .search-bar-input:focus { border-color: var(--primary); }
+              .search-clear-btn { display: none; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; padding: 0; margin: 0; border-radius: 999px; background: rgba(148,163,184,0.2); color: var(--text); border: none; font-size: 0.78rem; line-height: 28px; text-align: center; }
+              .filtros-apps { display: flex; gap: 6px; margin-bottom: 12px; overflow-x: auto; padding-bottom: 2px; }
+              .filtro-btn { width: auto; padding: 6px 11px; font-size: 0.74rem; border-radius: 999px; background: var(--card-dark); color: var(--muted); border: 1px solid var(--border); margin-top: 0; white-space: nowrap; }
+              .filtro-btn.ativo { background: var(--primary); color: #082f49; border-color: var(--primary); }
+              .filtro-btn.warn { background: rgba(245,158,11,0.18); color: #fbbf24; border-color: var(--warning); }
+              .app-list { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; }
+              .app-item { background: var(--card-dark); border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+              .app-item.app-bloqueado { border-color: var(--danger); background: rgba(239,68,68,0.08); }
+              .app-main { flex: 1; min-width: 0; }
+              .app-nome { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .app-pkg { font-size: 0.7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .app-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+              .tag { font-size: 0.68rem; padding: 2px 7px; border-radius: 6px; font-weight: 600; display: inline-block; }
+              .tag-net-on { background: rgba(34,197,94,0.2); color: #4ade80; }
+              .tag-net-block { background: rgba(239,68,68,0.25); color: #f87171; border: 1px solid var(--danger); }
+              .tag-geo-on { background: rgba(245,158,11,0.2); color: #fbbf24; }
+              .tag-critico { background: rgba(239,68,68,0.22); color: #f87171; border: 1px solid var(--danger); }
+              .app-right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+              .app-consumo { font-weight: 800; font-size: 0.88rem; color: var(--primary); white-space: nowrap; }
+              .btn-app-lock { width: auto; padding: 4px 10px; font-size: 0.72rem; border-radius: 6px; margin-top: 0; white-space: nowrap; }
+              .device-card { background: var(--card-dark); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+              .device-card.bloqueado { border-color: var(--danger); }
+              .device-card.critico { border-color: var(--warning); }
+              .device-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; gap: 8px; }
+              .device-name { font-size: 1rem; font-weight: 800; color: var(--text); }
+              .status-dot { font-size: 0.72rem; padding: 3px 8px; border-radius: 999px; font-weight: 700; white-space: nowrap; }
+              .status-online { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid var(--success); }
+              .status-offline { background: rgba(148,163,184,0.15); color: var(--muted); border: 1px solid var(--border); }
+              .status-blocked { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid var(--danger); }
+              .mini-progress { width: 100%; height: 6px; background: #0b1120; border-radius: 999px; overflow: hidden; margin-top: 6px; border: 1px solid var(--border); }
+              .mini-progress-fill { height: 100%; width: 0%; transition: width 0.3s ease; }
+              .device-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+              .device-actions button { padding: 8px; font-size: 0.8rem; margin-top: 0; }
+              .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.82); z-index: 1000; padding: 12px; overflow-y: auto; }
+              .modal-box { background: var(--card); border: 1px solid var(--primary); border-radius: 14px; padding: 14px; max-width: 600px; margin: 10px auto; }
+              .config-remota-box { background: var(--card-dark); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+              .rename-row { display: flex; gap: 6px; margin-top: 6px; }
+              .rename-row input { flex: 1; margin-top: 0; }
+              .rename-row button { width: auto; padding: 0 14px; margin-top: 0; white-space: nowrap; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>🖥️ Central de Monitoramento</h1>
+              <span id="statusCentral" class="badge-rede">🔥 Conectando Firebase...</span>
+            </div>
+
+            <div class="grid-4">
+              <div class="metric-box"><div class="metric-label">Aparelhos</div><div class="metric-val" id="resumoTotalAparelhos">0</div></div>
+              <div class="metric-box"><div class="metric-label">Online</div><div class="metric-val" id="resumoOnlineAgora" style="color: var(--success);">0</div></div>
+              <div class="metric-box"><div class="metric-label">Consumo Total</div><div class="metric-val" id="resumoConsumoFrota" style="color: var(--primary);">0.00 GB</div></div>
+              <div class="metric-box"><div class="metric-label">Offline</div><div class="metric-val" id="resumoOfflineCount" style="color: var(--warning);">0</div></div>
+            </div>
+
+            <div class="card">
+              <div class="card-title">
+                <span>📲 Aparelhos Conectados</span>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                  <button class="filtro-btn warn" onclick="removerAparelhosOffline()">🧹 Remover Off</button>
+                  <button class="filtro-btn" onclick="reconectarTudo()">🔄 Atualizar</button>
+                  <button class="filtro-btn" onclick="simularAparelhoExtra()">🧪 +1 Teste</button>
+                </div>
+              </div>
+
+              <!-- Barra de Pesquisa por Nome / ID / Operadora / Cidade -->
+              <div class="search-bar-wrap">
+                <input
+                  type="text"
+                  id="inputBuscaFrota"
+                  class="search-bar-input"
+                  placeholder="🔍 Buscar cliente por nome, ID, cidade ou operadora..."
+                  oninput="atualizarBuscaFrota()"
+                />
+                <button type="button" id="btnLimparBusca" class="search-clear-btn" onclick="limparBuscaFrota()">✖</button>
+              </div>
+
+              <!-- Abas de Filtros Rapidos da Frota -->
+              <div class="filtros-apps">
+                <button type="button" class="filtro-btn ativo" id="ff-todos" onclick="definirFiltroFrota('todos')">Todos (0)</button>
+                <button type="button" class="filtro-btn" id="ff-online" onclick="definirFiltroFrota('online')">🟢 Online (0)</button>
+                <button type="button" class="filtro-btn" id="ff-offline" onclick="definirFiltroFrota('offline')">⚪ Offline (0)</button>
+                <button type="button" class="filtro-btn" id="ff-criticos" onclick="definirFiltroFrota('criticos')">🚨 Criticos ≥80% (0)</button>
+                <button type="button" class="filtro-btn" id="ff-bloqueados" onclick="definirFiltroFrota('bloqueados')">🛡️ Bloqueados (0)</button>
+              </div>
+
+              <div id="listaFrotaContainer"><div class="sub-info">Carregando aparelhos do Firebase...</div></div>
+            </div>
+
+            <div id="modalAparelhoRemoto" class="modal-overlay">
+              <div class="modal-box">
+                <div class="card-title">
+                  <span id="modalTituloAparelho" style="color:var(--primary); font-size:0.95rem;">Detalhes do Aparelho</span>
+                  <div style="display:flex; gap:6px;">
+                    <button class="filtro-btn" style="border-color:var(--danger); color:#f87171;" onclick="removerAparelhoIndividualModal()">🗑️ Excluir</button>
+                    <button class="filtro-btn" onclick="fecharModalRemoto()">✖ Fechar</button>
+                  </div>
+                </div>
+
+                <!-- Renomear Dispositivo -->
+                <div class="config-remota-box">
+                  <div class="card-title" style="margin-bottom: 4px;">
+                    <span>✏️ Nome do Dispositivo / Cliente</span>
+                    <span id="statusNomeRemoto" style="color:var(--success); font-size:0.75rem; font-weight:700;"></span>
+                  </div>
+                  <div class="rename-row">
+                    <input type="text" id="modalInputNomeAparelho" placeholder="Ex: Cliente Maria - 85 99999-0000" />
+                    <button type="button" class="btn-primary" onclick="salvarNomeAparelhoRemoto()">💾 Salvar Nome</button>
+                  </div>
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 10px;">
+                  <div class="metric-box"><div class="metric-label">Consumo / Plano</div><div class="metric-val" id="modalConsumoPlano" style="font-size:0.9rem;">--</div></div>
+                  <div class="metric-box"><div class="metric-label">Rede Ativa / Ping</div><div class="metric-val" id="modalRedePing" style="font-size:0.88rem;">--</div></div>
+                  <div class="metric-box"><div class="metric-label">Endereco / Bairro / Cidade</div><div class="metric-val" id="modalCidadeOp" style="font-size:0.82rem; line-height:1.3;">--</div></div>
+                  <div class="metric-box"><div class="metric-label">Coordenadas GPS Exatas</div><div class="metric-val" id="modalCoordsGps" style="font-size:0.8rem;">--</div></div>
+                </div>
+
+                <div class="config-remota-box">
+                  <div class="card-title" style="margin-bottom: 6px;">
+                    <span>⚙️ Escolher Plano e Ciclo do Aparelho</span>
+                    <span id="statusSalvoRemoto" style="color:var(--success); font-size:0.75rem; font-weight:700;"></span>
+                  </div>
+                  <label class="metric-label">Toque no Plano Desejado:</label>
+                  <div class="planos-grid">
+                    <button type="button" class="plano-chip" id="mPlano-0" onclick="selecionarPlanoRemotoUI(0)" style="grid-column: span 2;">♾️ Ilimitado</button>
+                    <button type="button" class="plano-chip" id="mPlano-43" onclick="selecionarPlanoRemotoUI(43)">43 GB</button>
+                    <button type="button" class="plano-chip" id="mPlano-48" onclick="selecionarPlanoRemotoUI(48)">48 GB</button>
+                    <button type="button" class="plano-chip" id="mPlano-91" onclick="selecionarPlanoRemotoUI(91)">91 GB</button>
+                    <button type="button" class="plano-chip" id="mPlano-134" onclick="selecionarPlanoRemotoUI(134)">134 GB</button>
+                  </div>
+
+                  <label class="metric-label">Dia de Renovacao do Ciclo (1 a 28):</label>
+                  <div class="ciclo-ctrl">
+                    <button type="button" class="ciclo-btn" onclick="ajustarDiaRemotoUI(-1)">-</button>
+                    <input type="number" id="modalInputDiaCiclo" min="1" max="28" value="1" style="margin-top:0; text-align:center; font-weight:700;" />
+                    <button type="button" class="ciclo-btn" onclick="ajustarDiaRemotoUI(1)">+</button>
+                  </div>
+
+                  <div class="grid-2" style="margin-top: 10px;">
+                    <button type="button" class="btn-primary" style="margin-top:0;" onclick="salvarPlanoCicloRemoto()">💾 Salvar no Aparelho</button>
+                    <button type="button" class="btn-sec" style="margin-top:0;" onclick="zerarContadorRemoto()">🔄 Zerar Contador Hoje</button>
+                  </div>
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 12px;">
+                  <button id="btnAbrirMapaModal" class="btn-sec" style="margin-top:0;">🗺️ Abrir Ponto Exato no Mapa</button>
+                  <button id="btnToggleDadosModal" class="btn-danger" style="margin-top:0;">🛡️ Bloquear Todos</button>
+                </div>
+
+                <div class="card-title">
+                  <span>📱 Controle de Internet por Aplicativo</span>
+                  <span id="modalContadorApps">0 apps</span>
+                </div>
+                <div class="filtros-apps">
+                  <button class="filtro-btn ativo" id="mf-todos" onclick="filtrarAppsRemoto('todos')">Todos</button>
+                  <button class="filtro-btn" id="mf-geo" onclick="filtrarAppsRemoto('geo')">📍 Com GPS</button>
+                  <button class="filtro-btn" id="mf-rede" onclick="filtrarAppsRemoto('rede')">🟢 Em Trafego</button>
+                  <button class="filtro-btn" id="mf-bloq" onclick="filtrarAppsRemoto('bloq')">🚫 Bloqueados</button>
+                </div>
+                <div class="app-list" id="modalListaApps"></div>
+              </div>
+            </div>
+
+            <script>
+              var FIREBASE_URL = 'https://painel-2d29e-default-rtdb.firebaseio.com';
+
+              var memoriaSegura = {};
+              function lerDado(chave, padrao) {
+                try { var val = window.localStorage.getItem(chave); return val !== null ? val : padrao; }
+                catch (e) { return memoriaSegura[chave] !== undefined ? memoriaSegura[chave] : padrao; }
+              }
+              function salvarDado(chave, valor) {
+                memoriaSegura[chave] = String(valor);
+                try { window.localStorage.setItem(chave, String(valor)); } catch (e) {}
+              }
+
+              var frotaAparelhos = {};
+              var nomesPersonalizados = {};
+              var aparelhosExcluidos = {};
+              var firebaseConectado = false;
+
+              try { frotaAparelhos = JSON.parse(lerDado('frotaAparelhos_v10', '{}')) || {}; } catch (e) { frotaAparelhos = {}; }
+              try { nomesPersonalizados = JSON.parse(lerDado('nomesPersonalizados_v8', '{}')) || {}; } catch (e) { nomesPersonalizados = {}; }
+              try { aparelhosExcluidos = JSON.parse(lerDado('aparelhosExcluidos_v8', '{}')) || {}; } catch (e) { aparelhosExcluidos = {}; }
+
+              var aparelhoRemotoSelecionado = null;
+              var filtroModalRemoto = 'todos';
+              var planoSelecionadoNoModal = 0;
+              var filtroFrotaAtual = 'todos';
+              var termoBuscaFrota = '';
+
+              function gravarComandoEConfigFirebase(deviceId, comandoObj, dadosAparelho, configPatch) {
+                try {
+                  if (comandoObj) {
+                    fetch(FIREBASE_URL + '/frota/comandos/' + encodeURIComponent(deviceId) + '.json', {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(comandoObj)
+                    }).catch(function() {});
+                  }
+                  if (configPatch) {
+                    fetch(FIREBASE_URL + '/frota/config/' + encodeURIComponent(deviceId) + '.json', {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(configPatch)
+                    }).catch(function() {});
+                  }
+                  if (dadosAparelho) {
+                    fetch(FIREBASE_URL + '/frota/aparelhos/' + encodeURIComponent(deviceId) + '.json', {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(dadosAparelho)
+                    }).catch(function() {});
+                  }
+                } catch (e) {}
+              }
+
+              function excluirAparelhoDoFirebase(id) {
+                try {
+                  fetch(FIREBASE_URL + '/frota/aparelhos/' + encodeURIComponent(id) + '.json', { method: 'DELETE' }).catch(function() {});
+                  fetch(FIREBASE_URL + '/frota/comandos/' + encodeURIComponent(id) + '.json', { method: 'DELETE' }).catch(function() {});
+                  fetch(FIREBASE_URL + '/frota/config/' + encodeURIComponent(id) + '.json', { method: 'DELETE' }).catch(function() {});
+                } catch (e) {}
+              }
+
+              function carregarFrotaDoFirebase() {
+                try {
+                  fetch(FIREBASE_URL + '/frota/aparelhos.json?t=' + Date.now())
+                    .then(function(res) {
+                      if (!res.ok) return null;
+                      firebaseConectado = true;
+                      return res.json();
+                    })
+                    .then(function(mapaNuvem) {
+                      if (!mapaNuvem || typeof mapaNuvem !== 'object') {
+                        frotaAparelhos = {};
+                        salvarDado('frotaAparelhos_v10', '{}');
+                        atualizarBadgeStatusCentral();
+                        renderizarFrota();
+                        return;
+                      }
+                      var ids = Object.keys(mapaNuvem);
+                      for (var i = 0; i < ids.length; i++) {
+                        var item = mapaNuvem[ids[i]];
+                        if (item && item.deviceId) {
+                          registrarAparelhoNaTela(item, true);
+                        }
+                      }
+                      atualizarBadgeStatusCentral();
+                      renderizarFrota();
+                    })
+                    .catch(function() {});
+                } catch (e) {}
+              }
+
+              function atualizarBadgeStatusCentral() {
+                var totalAparelhos = Object.keys(frotaAparelhos).length;
+                if (firebaseConectado) {
+                  document.getElementById('statusCentral').textContent = '🔥 Firebase Ao Vivo (' + totalAparelhos + ')';
+                }
+              }
+
+              function aparelhoEstaOnline(item) {
+                if (!item || !item.timestamp) return false;
+                var diffSeg = Math.max(0, Math.floor((Date.now() - Number(item.timestamp)) / 1000));
+                return diffSeg <= 90;
+              }
+
+              function aparelhoEhCritico(item) {
+                if (!item) return false;
+                var plano = Number(item.planoGB || 0);
+                if (plano <= 0) return false;
+                var consumo = Number(item.consumoGB || 0);
+                return (consumo / plano) >= 0.8;
+              }
+
+              function aparelhoTemBloqueio(item) {
+                if (!item) return false;
+                if (Boolean(item.dadosDesligados)) return true;
+                var qtdAppsBloq = (item.apps || []).filter(function(a) { return a.bloqueado; }).length;
+                return qtdAppsBloq > 0;
+              }
+
+              function atualizarBuscaFrota() {
+                var input = document.getElementById('inputBuscaFrota');
+                termoBuscaFrota = (input ? input.value : '').trim().toLowerCase();
+                var btnLimpar = document.getElementById('btnLimparBusca');
+                if (btnLimpar) {
+                  btnLimpar.style.display = termoBuscaFrota.length > 0 ? 'block' : 'none';
+                }
+                renderizarFrota();
+              }
+
+              function limparBuscaFrota() {
+                var input = document.getElementById('inputBuscaFrota');
+                if (input) input.value = '';
+                termoBuscaFrota = '';
+                var btnLimpar = document.getElementById('btnLimparBusca');
+                if (btnLimpar) btnLimpar.style.display = 'none';
+                renderizarFrota();
+              }
+
+              function definirFiltroFrota(novoFiltro) {
+                filtroFrotaAtual = novoFiltro;
+                var abas = ['todos', 'online', 'offline', 'criticos', 'bloqueados'];
+                for (var i = 0; i < abas.length; i++) {
+                  var btn = document.getElementById('ff-' + abas[i]);
+                  if (btn) {
+                    btn.classList.toggle('ativo', filtroFrotaAtual === abas[i]);
+                  }
+                }
+                renderizarFrota();
+              }
+
+              function destacarBotoesPlanoModal(valorPlano) {
+                planoSelecionadoNoModal = Number(valorPlano) || 0;
+                var opcoes = [0, 43, 48, 91, 134];
+                for (var i = 0; i < opcoes.length; i++) {
+                  var btn = document.getElementById('mPlano-' + opcoes[i]);
+                  if (btn) {
+                    btn.classList.toggle('ativo', planoSelecionadoNoModal === opcoes[i]);
+                  }
+                }
+              }
+
+              function selecionarPlanoRemotoUI(novoGb) {
+                destacarBotoesPlanoModal(novoGb);
+                salvarPlanoCicloRemoto();
+              }
+
+              function ajustarDiaRemotoUI(delta) {
+                var input = document.getElementById('modalInputDiaCiclo');
+                var atual = parseInt(input.value || '1', 10) || 1;
+                var novo = Math.max(1, Math.min(28, atual + delta));
+                input.value = String(novo);
+                salvarPlanoCicloRemoto();
+              }
+
+              function abrirMapaSeguro(lat, lon, nome) {
+                var latitude = Number(lat || 0);
+                var longitude = Number(lon || 0);
+                if (latitude === 0 && longitude === 0) {
+                  alert('Aguardando o aparelho enviar a coordenada GPS exata.');
+                  return;
+                }
+                var latStr = latitude.toFixed(7);
+                var lonStr = longitude.toFixed(7);
+                var rotulo = nome || 'Aparelho Monitorado';
+                if (typeof window.AndroidMonitor !== 'undefined' && window.AndroidMonitor.abrirMapaNativo) {
+                  window.AndroidMonitor.abrirMapaNativo(latitude, longitude, rotulo);
+                } else {
+                  window.open('https://www.google.com/maps/search/?api=1&query=' + latStr + ',' + lonStr, '_blank');
+                }
+              }
+
+              function registrarAparelhoNaTela(payload, silencioso) {
+                if (!payload || !payload.deviceId) return;
+                var id = payload.deviceId;
+
+                if (aparelhosExcluidos[id]) {
+                  if ((payload.timestamp || 0) <= aparelhosExcluidos[id]) {
+                    return;
+                  } else {
+                    delete aparelhosExcluidos[id];
+                    salvarDado('aparelhosExcluidos_v8', JSON.stringify(aparelhosExcluidos));
+                  }
+                }
+
+                if (nomesPersonalizados[id]) {
+                  payload.nome = nomesPersonalizados[id];
+                }
+
+                frotaAparelhos[id] = payload;
+                salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
+                if (!silencioso) {
+                  renderizarFrota();
+                  atualizarBadgeStatusCentral();
+                }
+                if (aparelhoRemotoSelecionado === id) { preencherModalRemoto(payload, true); }
+              }
+
+              function salvarNomeAparelhoRemoto() {
+                if (!aparelhoRemotoSelecionado) return;
+                var d = frotaAparelhos[aparelhoRemotoSelecionado];
+                if (!d) return;
+
+                var inputNome = document.getElementById('modalInputNomeAparelho');
+                var novoNome = (inputNome.value || '').trim();
+                if (!novoNome) return;
+
+                d.nome = novoNome;
+                nomesPersonalizados[d.deviceId] = novoNome;
+                salvarDado('nomesPersonalizados_v8', JSON.stringify(nomesPersonalizados));
+
+                var comando = {
+                  deviceId: d.deviceId,
+                  acao: 'RENOMEAR_APARELHO',
+                  novoNome: novoNome,
+                  timestamp: Date.now()
+                };
+
+                registrarAparelhoNaTela(d, false);
+                gravarComandoEConfigFirebase(d.deviceId, comando, d, { nome: novoNome, updatedAt: Date.now() });
+
+                var av = document.getElementById('statusNomeRemoto');
+                av.textContent = '✅ Renomeado no Firebase!';
+                setTimeout(function() { av.textContent = ''; }, 2500);
+              }
+
+              function removerAparelhosOffline() {
+                var chaves = Object.keys(frotaAparelhos);
+                var removidos = 0;
+                for (var i = 0; i < chaves.length; i++) {
+                  var id = chaves[i];
+                  var item = frotaAparelhos[id];
+                  if (!aparelhoEstaOnline(item)) {
+                    aparelhosExcluidos[id] = Date.now();
+                    delete frotaAparelhos[id];
+                    excluirAparelhoDoFirebase(id);
+                    if (aparelhoRemotoSelecionado === id) {
+                      fecharModalRemoto();
+                    }
+                    removidos++;
+                  }
+                }
+                salvarDado('aparelhosExcluidos_v8', JSON.stringify(aparelhosExcluidos));
+                salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
+                renderizarFrota();
+                document.getElementById('statusCentral').textContent = removidos > 0 ? ('🧹 ' + removidos + ' off removido(s)') : '🔥 Firebase Ao Vivo (' + Object.keys(frotaAparelhos).length + ')';
+                setTimeout(atualizarBadgeStatusCentral, 2500);
+              }
+
+              function removerAparelhoPorId(id) {
+                if (!id || !frotaAparelhos[id]) return;
+                aparelhosExcluidos[id] = Date.now();
+                delete frotaAparelhos[id];
+                excluirAparelhoDoFirebase(id);
+                salvarDado('aparelhosExcluidos_v8', JSON.stringify(aparelhosExcluidos));
+                salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
+                if (aparelhoRemotoSelecionado === id) {
+                  fecharModalRemoto();
+                }
+                renderizarFrota();
+                atualizarBadgeStatusCentral();
+              }
+
+              function removerAparelhoIndividualModal() {
+                if (!aparelhoRemotoSelecionado) return;
+                removerAparelhoPorId(aparelhoRemotoSelecionado);
+              }
+
+              function salvarPlanoCicloRemoto() {
+                if (!aparelhoRemotoSelecionado) return;
+                var d = frotaAparelhos[aparelhoRemotoSelecionado];
+                if (!d) return;
+
+                var novoPlano = Number(planoSelecionadoNoModal) || 0;
+                var novoDia = Math.max(1, Math.min(28, parseInt(document.getElementById('modalInputDiaCiclo').value || '1', 10) || 1));
+                document.getElementById('modalInputDiaCiclo').value = String(novoDia);
+
+                d.planoGB = novoPlano;
+                d.diaCiclo = novoDia;
+
+                var comando = {
+                  deviceId: d.deviceId,
+                  acao: 'CONFIG_PLANO',
+                  planoGB: novoPlano,
+                  diaCiclo: novoDia,
+                  timestamp: Date.now()
+                };
+
+                registrarAparelhoNaTela(d, false);
+                gravarComandoEConfigFirebase(d.deviceId, comando, d, { planoGB: novoPlano, diaCiclo: novoDia, updatedAt: Date.now() });
+
+                var av = document.getElementById('statusSalvoRemoto');
+                var nomePlano = novoPlano > 0 ? (novoPlano + ' GB') : 'Ilimitado';
+                av.textContent = '✅ ' + nomePlano + ' (Dia ' + novoDia + ') salvo!';
+                setTimeout(function() { av.textContent = ''; }, 3000);
+              }
+
+              function zerarContadorRemoto() {
+                if (!aparelhoRemotoSelecionado) return;
+                var d = frotaAparelhos[aparelhoRemotoSelecionado];
+                if (!d) return;
+
+                var agoraTs = Date.now();
+                d.consumoGB = 0;
+                var comando = {
+                  deviceId: d.deviceId,
+                  acao: 'ZERAR_CONTADOR',
+                  timestamp: agoraTs
+                };
+
+                registrarAparelhoNaTela(d, false);
+                gravarComandoEConfigFirebase(d.deviceId, comando, d, { zerarTimestamp: agoraTs, updatedAt: agoraTs });
+
+                var av = document.getElementById('statusSalvoRemoto');
+                av.textContent = '✅ Contador zerado!';
+                setTimeout(function() { av.textContent = ''; }, 2500);
+              }
+
+              function alternarFirewallGeralAparelho(id) {
+                var d = frotaAparelhos[id];
+                if (!d) return;
+                var bloquearAgora = !Boolean(d.dadosDesligados);
+                var comando = { deviceId: id, acao: 'FIREWALL_GERAL', bloquear: bloquearAgora, timestamp: Date.now() };
+
+                d.dadosDesligados = bloquearAgora;
+                d.rede = bloquearAgora ? '🛡️ Apps Bloqueados' : '4G/5G Movel';
+                if (bloquearAgora) d.velocidade = 0;
+
+                if (d.apps && d.apps.length > 0) {
+                  for (var i = 0; i < d.apps.length; i++) {
+                    d.apps[i].bloqueado = bloquearAgora || Boolean(d.appsBloqueadosMap && d.appsBloqueadosMap[d.apps[i].pacote]);
+                  }
+                }
+                registrarAparelhoNaTela(d, false);
+                gravarComandoEConfigFirebase(id, comando, d, { dadosDesligados: bloquearAgora, updatedAt: Date.now() });
+              }
+
+              function alternarBloqueioAppIndividual(id, pacoteApp) {
+                var d = frotaAparelhos[id];
+                if (!d || !pacoteApp) return;
+                if (!d.appsBloqueadosMap) d.appsBloqueadosMap = {};
+                var bloquearApp = !Boolean(d.appsBloqueadosMap[pacoteApp]);
+
+                if (bloquearApp) { d.appsBloqueadosMap[pacoteApp] = true; } else { delete d.appsBloqueadosMap[pacoteApp]; }
+
+                if (d.apps && d.apps.length > 0) {
+                  for (var i = 0; i < d.apps.length; i++) {
+                    if (d.apps[i].pacote === pacoteApp) {
+                      d.apps[i].bloqueado = Boolean(d.dadosDesligados) || bloquearApp;
+                    }
+                  }
+                }
+
+                var comando = { deviceId: id, acao: 'FIREWALL_APP', pacote: pacoteApp, bloquear: bloquearApp, timestamp: Date.now() };
+                registrarAparelhoNaTela(d, false);
+                gravarComandoEConfigFirebase(id, comando, d, { appsBloqueadosMap: d.appsBloqueadosMap, updatedAt: Date.now() });
+              }
+
+              function reconectarTudo() {
+                document.getElementById('statusCentral').textContent = '🔄 Sincronizando Firebase...';
+                carregarFrotaDoFirebase();
+                setTimeout(atualizarBadgeStatusCentral, 1200);
+              }
+
+              function simularAparelhoExtra() {
+                var modelos = ['Samsung Galaxy A54', 'Motorola Moto G84', 'Xiaomi Redmi Note 13'];
+                var idSim = 'CEL-' + Math.floor(Math.random() * 900 + 100);
+                var pacoteTeste = {
+                  deviceId: idSim, nome: modelos[Math.floor(Math.random() * modelos.length)] + ' • ' + idSim, timestamp: Date.now(),
+                  consumoGB: 36.8, planoGB: 43, diaCiclo: 10, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosMap: {}, velocidade: 45.5, latencia: 18,
+                  cidade: 'Jardim Iracema • Fortaleza - CE', endereco: 'Av. Major Assis, Jardim Iracema • Fortaleza - CE', operadora: 'Vivo', lat: -3.7248512, lon: -38.5819421,
+                  apps: [
+                    { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 1420.5, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false },
+                    { nome: 'Instagram', pacote: 'com.instagram.android', totalMB: 2310.0, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false }
+                  ]
+                };
+                registrarAparelhoNaTela(pacoteTeste, false);
+                gravarComandoEConfigFirebase(idSim, null, pacoteTeste, null);
+              }
+
+              function renderizarFrota() {
+                var chaves = Object.keys(frotaAparelhos);
+                var lista = [];
+                for (var i = 0; i < chaves.length; i++) { lista.push(frotaAparelhos[chaves[i]]); }
+                lista.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
+
+                var onlineCount = 0, offlineCount = 0, criticosCount = 0, bloqueadosCount = 0, somaGB = 0;
+
+                for (var j = 0; j < lista.length; j++) {
+                  var d = lista[j];
+                  if (aparelhoEstaOnline(d)) { onlineCount++; } else { offlineCount++; }
+                  if (aparelhoEhCritico(d)) { criticosCount++; }
+                  if (aparelhoTemBloqueio(d)) { bloqueadosCount++; }
+                  somaGB += Number(d.consumoGB || 0);
+                }
+
+                document.getElementById('resumoTotalAparelhos').textContent = String(lista.length);
+                document.getElementById('resumoOnlineAgora').textContent = String(onlineCount);
+                document.getElementById('resumoConsumoFrota').textContent = somaGB.toFixed(2) + ' GB';
+                document.getElementById('resumoOfflineCount').textContent = String(offlineCount);
+
+                // Atualizar contadores nos botoes de filtro rapido
+                var elTodos = document.getElementById('ff-todos');
+                var elOnline = document.getElementById('ff-online');
+                var elOffline = document.getElementById('ff-offline');
+                var elCriticos = document.getElementById('ff-criticos');
+                var elBloqueados = document.getElementById('ff-bloqueados');
+                if (elTodos) elTodos.textContent = 'Todos (' + lista.length + ')';
+                if (elOnline) elOnline.textContent = '🟢 Online (' + onlineCount + ')';
+                if (elOffline) elOffline.textContent = '⚪ Offline (' + offlineCount + ')';
+                if (elCriticos) elCriticos.textContent = '🚨 Criticos ≥80% (' + criticosCount + ')';
+                if (elBloqueados) elBloqueados.textContent = '🛡️ Bloqueados (' + bloqueadosCount + ')';
+
+                // Aplicar filtro de aba + barra de pesquisa
+                var listaFiltrada = lista.filter(function(item) {
+                  if (filtroFrotaAtual === 'online' && !aparelhoEstaOnline(item)) return false;
+                  if (filtroFrotaAtual === 'offline' && aparelhoEstaOnline(item)) return false;
+                  if (filtroFrotaAtual === 'criticos' && !aparelhoEhCritico(item)) return false;
+                  if (filtroFrotaAtual === 'bloqueados' && !aparelhoTemBloqueio(item)) return false;
+
+                  if (termoBuscaFrota.length > 0) {
+                    var alvo = (
+                      String(item.nome || '') + ' ' +
+                      String(item.deviceId || '') + ' ' +
+                      String(item.operadora || '') + ' ' +
+                      String(item.cidade || '') + ' ' +
+                      String(item.endereco || '')
+                    ).toLowerCase();
+                    if (alvo.indexOf(termoBuscaFrota) === -1) return false;
+                  }
+                  return true;
+                });
+
+                var container = document.getElementById('listaFrotaContainer');
+                if (lista.length === 0) {
+                  container.innerHTML = '<div class="sub-info">Nenhum aparelho conectado no momento.</div>';
+                  return;
+                }
+                if (listaFiltrada.length === 0) {
+                  container.innerHTML = '<div class="sub-info">Nenhum aparelho encontrado para este filtro ou pesquisa.</div>';
+                  return;
+                }
+
+                container.innerHTML = listaFiltrada.map(function(item) {
+                  var isOnline = aparelhoEstaOnline(item);
+                  var bloqueado = Boolean(item.dadosDesligados);
+                  var ehCritico = aparelhoEhCritico(item);
+                  var qtdBloqIndiv = (item.apps || []).filter(function(a) { return a.bloqueado; }).length;
+                  var tempoTexto = bloqueado ? 'Apps Bloqueados' : (isOnline ? 'Online agora' : 'Offline');
+
+                  var planoNum = Number(item.planoGB || 0);
+                  var consumoNum = Number(item.consumoGB || 0);
+                  var pctUso = planoNum > 0 ? Math.min(100, (consumoNum / planoNum) * 100) : 100;
+                  var corBarra = planoNum === 0 ? 'var(--primary)' : (pctUso >= 90 ? 'var(--danger)' : (pctUso >= 80 ? 'var(--warning)' : 'var(--success)'));
+
+                  var txtPlanoCard = planoNum > 0 ? (planoNum + ' GB (' + pctUso.toFixed(0) + '%) • Dia ' + (item.diaCiclo || 1)) : ('Ilimitado • Dia ' + (item.diaCiclo || 1));
+                  var btnAppsHtml = bloqueado ? '<button class="btn-success" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🟢 Liberar Apps</button>' : '<button class="btn-danger" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🛡️ Bloquear Apps</button>';
+                  var tagAppsInfo = qtdBloqIndiv > 0 ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' apps bloqueados</span>' : '<span class="tag tag-net-on">📦 Apps liberados</span>';
+                  var tagCriticoHtml = ehCritico ? ' <span class="tag tag-critico">🚨 ' + pctUso.toFixed(0) + '% usado</span>' : '';
+                  var btnRemoverOffCard = !isOnline ? '<button class="filtro-btn" style="border-color:var(--danger); color:#f87171;" onclick="removerAparelhoPorId(\'' + item.deviceId + '\')">🗑️ Remover Off</button>' : '';
+
+                  var localCard = item.cidade || 'Localizando...';
+                  var classeCard = bloqueado ? 'bloqueado' : (ehCritico ? 'critico' : '');
+
+                  return '<div class="device-card ' + classeCard + '">' +
+                    '<div class="device-header"><div><div class="device-name">📱 ' + item.nome + '</div><div class="app-pkg">ID: ' + item.deviceId + ' • Plano: ' + txtPlanoCard + '</div></div>' +
+                    '<span class="status-dot ' + (bloqueado ? 'status-blocked' : (isOnline ? 'status-online' : 'status-offline')) + '">' + tempoTexto + '</span></div>' +
+                    '<div class="grid-2"><div class="metric-box"><div class="metric-label">Consumo</div><div class="metric-val" style="color:var(--primary);">' + consumoNum.toFixed(2) + ' GB</div>' +
+                    '<div class="mini-progress"><div class="mini-progress-fill" style="width:' + pctUso + '%; background:' + corBarra + ';"></div></div></div>' +
+                    '<div class="metric-box"><div class="metric-label">Rede</div><div class="metric-val" style="font-size:0.88rem;">' + item.rede + '</div></div></div>' +
+                    '<div class="app-badges" style="margin-top: 8px; justify-content:space-between; align-items:center;"><div><span class="tag tag-geo-on">📍 ' + localCard + '</span> ' + tagAppsInfo + tagCriticoHtml + '</div>' + btnRemoverOffCard + '</div>' +
+                    '<div class="device-actions"><button onclick="abrirModalRemoto(\'' + item.deviceId + '\')">✏️ Renomear / Plano / Apps</button>' + btnAppsHtml + '</div></div>';
+                }).join('');
+              }
+
+              function abrirModalRemoto(id) {
+                var dados = frotaAparelhos[id];
+                if (!dados) return;
+                aparelhoRemotoSelecionado = id;
+                filtroModalRemoto = 'todos';
+                preencherModalRemoto(dados, false);
+                document.getElementById('modalAparelhoRemoto').style.display = 'block';
+              }
+
+              function preencherModalRemoto(d, manterInputsAbertos) {
+                document.getElementById('modalTituloAparelho').textContent = '📱 ' + d.nome;
+                var txtPlano = Number(d.planoGB || 0) > 0 ? (d.planoGB + ' GB') : 'Ilimitado';
+                document.getElementById('modalConsumoPlano').textContent = Number(d.consumoGB || 0).toFixed(2) + ' GB / ' + txtPlano + ' (Dia ' + (d.diaCiclo || 1) + ')';
+                document.getElementById('modalRedePing').textContent = d.rede + ' • ' + d.latencia + ' ms';
+
+                var txtEndCompleto = d.endereco ? d.endereco : (d.cidade || 'Localizando...');
+                document.getElementById('modalCidadeOp').textContent = txtEndCompleto + ' (' + (d.operadora || 'Rede Movel') + ')';
+
+                var latExib = Number(d.lat || 0).toFixed(6);
+                var lonExib = Number(d.lon || 0).toFixed(6);
+                var txtPrecisao = (d.precisaoMetros && d.precisaoMetros < 5000) ? (' (±' + d.precisaoMetros + 'm)') : '';
+                document.getElementById('modalCoordsGps').textContent = latExib + ', ' + lonExib + txtPrecisao;
+
+                destacarBotoesPlanoModal(d.planoGB || 0);
+                if (!manterInputsAbertos) {
+                  document.getElementById('modalInputNomeAparelho').value = String(d.nome || '');
+                  document.getElementById('modalInputDiaCiclo').value = String(d.diaCiclo || 1);
+                }
+
+                document.getElementById('btnAbrirMapaModal').onclick = function() {
+                  abrirMapaSeguro(d.lat, d.lon, d.nome);
+                };
+
+                var btnToggle = document.getElementById('btnToggleDadosModal');
+                btnToggle.textContent = d.dadosDesligados ? '🟢 Liberar Todos' : '🛡️ Bloquear Todos';
+                btnToggle.className = d.dadosDesligados ? 'btn-success' : 'btn-danger';
+                btnToggle.onclick = function() { alternarFirewallGeralAparelho(d.deviceId); };
+                filtrarAppsRemoto(filtroModalRemoto);
+              }
+
+              function filtrarAppsRemoto(filtro) {
+                filtroModalRemoto = filtro;
+                document.getElementById('mf-todos').classList.toggle('ativo', filtro === 'todos');
+                document.getElementById('mf-geo').classList.toggle('ativo', filtro === 'geo');
+                document.getElementById('mf-rede').classList.toggle('ativo', filtro === 'rede');
+                document.getElementById('mf-bloq').classList.toggle('ativo', filtro === 'bloq');
+
+                var d = frotaAparelhos[aparelhoRemotoSelecionado];
+                var lista = d ? (d.apps || []) : [];
+                renderizarListaAppsRemoto(lista, filtro, d);
+              }
+
+              function renderizarListaAppsRemoto(listaBase, filtro, dadosAparelho) {
+                var container = document.getElementById('modalListaApps');
+                var filtrados = listaBase || [];
+
+                if (filtro === 'geo') { filtrados = filtrados.filter(function(a) { return a.usaGeo; }); }
+                else if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado && a.emTransmissao; }); }
+                else if (filtro === 'bloq') { filtrados = filtrados.filter(function(a) { return a.bloqueado; }); }
+
+                document.getElementById('modalContadorApps').textContent = filtrados.length + ' apps';
+                if (filtrados.length === 0) { container.innerHTML = '<div class="sub-info">Nenhum aplicativo listado.</div>'; return; }
+
+                var devId = dadosAparelho ? dadosAparelho.deviceId : '';
+                container.innerHTML = filtrados.map(function(app) {
+                  var estaBloq = Boolean(app.bloqueado) || Boolean(dadosAparelho && dadosAparelho.dadosDesligados);
+                  var btnAppHtml = estaBloq ? '<button class="btn-success btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🟢 Liberar</button>' : '<button class="btn-danger btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🚫 Bloquear</button>';
+                  return '<div class="app-item ' + (estaBloq ? 'app-bloqueado' : '') + '">' +
+                    '<div class="app-main"><div class="app-nome">' + app.nome + '</div><div class="app-pkg">' + app.pacote + '</div>' +
+                    '<div class="app-badges">' + (estaBloq ? '<span class="tag tag-net-block">🚫 Bloqueado</span>' : '<span class="tag tag-net-on">🟢 Liberado</span>') + '</div></div>' +
+                    '<div class="app-right"><div class="app-consumo">' + app.totalMB + ' MB</div>' + btnAppHtml + '</div></div>';
+                }).join('');
+              }
+
+              function fecharModalRemoto() { aparelhoRemotoSelecionado = null; document.getElementById('modalAparelhoRemoto').style.display = 'none'; }
+
+              renderizarFrota();
+              carregarFrotaDoFirebase();
+              setInterval(carregarFrotaDoFirebase, 2500);
+            </script>
+          </body>
+          </html>
+          EOF
+
+          # ===================================================================
+          # 5. CONFIGURACOES DO GRADLE
+          # ===================================================================
+          echo "sdk.dir=$HOME/android-sdk" > local.properties
 
           cat << 'EOF' > settings.gradle
           pluginManagement {
@@ -74,8 +2857,8 @@ jobs:
                   applicationId "com.example.monitordados"
                   minSdk 23
                   targetSdk 33
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 13
+                  versionName "10.1"
               }
               buildTypes {
                   debug {
@@ -89,24 +2872,25 @@ jobs:
           }
           EOF
 
-      - name: 6. Compilar APK 1 - Monitor de Dados
+      - name: 5. Compilar APK 1 - Monitor de Dados
         run: |
-          gradle assembleDebug --no-daemon
+          export ANDROID_HOME=$HOME/android-sdk
+          /tmp/gradle-7.6.4/bin/gradle assembleDebug --no-daemon
           cp app/build/outputs/apk/debug/app-debug.apk APKs-Prontos/Monitor-Dados.apk
 
-      - name: 7. Compilar APK 2 - Painel Central
+      - name: 6. Compilar APK 2 - Painel Central
         run: |
-          if [ -f "app/src/main/assets/central.html" ]; then
-            cp app/src/main/assets/central.html app/src/main/assets/index.html
-          fi
+          cp app/src/main/assets/central.html app/src/main/assets/index.html
 
           sed -i 's/applicationId "com.example.monitordados"/applicationId "com.example.painelcentral"/g' app/build.gradle
+          sed -i 's/android:label="Monitor de Dados"/android:label="Painel Central"/g' app/build.gradle 2>/dev/null || true
           sed -i 's/android:label="Monitor de Dados"/android:label="Painel Central"/g' app/src/main/AndroidManifest.xml
 
-          gradle assembleDebug --no-daemon
+          export ANDROID_HOME=$HOME/android-sdk
+          /tmp/gradle-7.6.4/bin/gradle assembleDebug --no-daemon
           cp app/build/outputs/apk/debug/app-debug.apk APKs-Prontos/Painel-Central.apk
 
-      - name: 8. Publicar os 2 APKs para Download
+      - name: 7. Publicar os 2 APKs para Download
         uses: actions/upload-artifact@v4
         with:
           name: APKs-Monitor-e-Central
