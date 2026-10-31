@@ -1,4 +1,4 @@
-name: Gerar 2 APKs - Monitor e Central (v10.1 GPS Preciso + Cidade Real)
+name: Gerar 2 APKs - Monitor e Central (v10.2 Fix Bloqueio App + GPS Dinamico)
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
 
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
 
-      - name: 4. Gerar todos os arquivos completos do projeto (100% Firebase + GPS Alta Precisao)
+      - name: 4. Gerar todos os arquivos completos do projeto (v10.2)
         run: |
           mkdir -p app/src/main/assets
           mkdir -p app/src/main/java/com/example/monitordados
@@ -93,7 +93,8 @@ jobs:
                   <service
                       android:name=".MainActivity$MonitorSempreAtivoService"
                       android:enabled="true"
-                      android:exported="false" />
+                      android:exported="false"
+                      android:foregroundServiceType="location" />
 
                   <service
                       android:name=".MainActivity$FirewallVpnService"
@@ -121,7 +122,7 @@ jobs:
           sed -i 's/^          //' app/src/main/AndroidManifest.xml
 
           # ===================================================================
-          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE 24H + GPS PRECISO + GEOCODER REAL)
+          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE CSV + GPS EM TEMPO REAL)
           # ===================================================================
           cat << 'EOF' > app/src/main/java/com/example/monitordados/MainActivity.java
           package com.example.monitordados;
@@ -218,17 +219,19 @@ jobs:
               private static long ultimoTxBytesTotal = 0;
               private static long ultimoTempoLeitura = 0;
 
-              // Cache em tempo real de GPS de Alta Precisao e Endereco/Cidade
+              // Estado em tempo real de GPS Dinamico e Endereco
               private static volatile double melhorLat = 0.0;
               private static volatile double melhorLon = 0.0;
               private static volatile float melhorPrecisaoMetros = 99999f;
               private static volatile long ultimoTempoGps = 0L;
+              private static volatile long ultimoTimestampSatelite = 0L;
               private static volatile String cidadeDetectadaCache = "";
               private static volatile String enderecoDetectadoCache = "";
               private static double ultimaLatGeocodificada = 0.0;
               private static double ultimaLonGeocodificada = 0.0;
               private static long ultimoTempoGeocoder = 0L;
               private static LocationListener listenerGpsAtivo = null;
+              private static long ultimoRegistroListenerMs = 0L;
 
               public static boolean ehAppCentral(Context context) {
                   if (context == null || context.getPackageName() == null) return false;
@@ -266,34 +269,91 @@ jobs:
                   return nome;
               }
 
+              // Converte CSV ("com.whatsapp,com.instagram.android") para JSONObject em memoria
+              public static JSONObject csvParaJsonBloqueados(String csv) {
+                  JSONObject obj = new JSONObject();
+                  if (csv == null || csv.trim().isEmpty()) return obj;
+                  String[] partes = csv.split(",");
+                  for (String p : partes) {
+                      String limpo = p != null ? p.trim() : "";
+                      if (!limpo.isEmpty()) {
+                          try { obj.put(limpo, true); } catch (Throwable ignored) {}
+                      }
+                  }
+                  return obj;
+              }
+
+              // Converte JSONObject de apps bloqueados para CSV seguro para o Firebase (sem pontos nas chaves)
+              public static String jsonBloqueadosParaCsv(JSONObject mapa) {
+                  if (mapa == null) return "";
+                  List<String> lista = new ArrayList<>();
+                  Iterator<String> keys = mapa.keys();
+                  while (keys.hasNext()) {
+                      String k = keys.next();
+                      if (k != null && !k.trim().isEmpty() && mapa.optBoolean(k, false)) {
+                          lista.add(k.trim());
+                      }
+                  }
+                  Collections.sort(lista);
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < lista.size(); i++) {
+                      if (i > 0) sb.append(",");
+                      sb.append(lista.get(i));
+                  }
+                  return sb.toString();
+              }
+
               public static synchronized void registrarCoordenadaPrecisa(Context context, double lat, double lon, float precisao) {
+                  registrarCoordenadaInterna(context, lat, lon, precisao, System.currentTimeMillis(), true);
+              }
+
+              public static synchronized void registrarCoordenadaInterna(Context context, double lat, double lon, float precisao, long tempoFix, boolean ehAoVivo) {
                   if (lat == 0.0 && lon == 0.0) return;
                   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
 
                   long agora = System.currentTimeMillis();
-                  boolean maisRecente = (agora - ultimoTempoGps) > 45000;
-                  boolean maisPrecisa = precisao <= 0 || precisao <= (melhorPrecisaoMetros + 25f);
+                  float acc = (precisao > 0f) ? precisao : 25f;
 
-                  if (melhorLat == 0.0 || maisRecente || maisPrecisa) {
-                      melhorLat = lat;
-                      melhorLon = lon;
-                      if (precisao > 0) melhorPrecisaoMetros = precisao;
-                      ultimoTempoGps = agora;
-
-                      try {
-                          SharedPreferences.Editor ed = getPrefs(context).edit();
-                          ed.putString("gps_lat_exata", String.valueOf(lat));
-                          ed.putString("gps_lon_exata", String.valueOf(lon));
-                          ed.apply();
-                      } catch (Throwable ignored) {}
+                  if (!ehAoVivo) {
+                      // Leitura de getLastKnownLocation: so aceita se ainda nao tivermos posicao ou se o fix do satelite for realmente novo
+                      if (melhorLat != 0.0 && tempoFix <= ultimoTimestampSatelite) {
+                          return;
+                      }
+                      if (melhorLat != 0.0 && (agora - tempoFix) > 120000L) {
+                          return;
+                      }
+                  } else {
+                      // Leitura ao vivo: ignora apenas se chegou um salto muito impreciso (>200m) menos de 10s apos um fix excelente (<25m)
+                      if (melhorLat != 0.0 && (agora - ultimoTempoGps) < 10000L && acc > 200f && melhorPrecisaoMetros < 25f) {
+                          return;
+                      }
                   }
+
+                  double deslocamentoGraus = Math.abs(lat - melhorLat) + Math.abs(lon - melhorLon);
+                  melhorLat = lat;
+                  melhorLon = lon;
+                  melhorPrecisaoMetros = acc;
+                  ultimoTempoGps = agora;
+                  if (tempoFix > 0) {
+                      ultimoTimestampSatelite = Math.max(ultimoTimestampSatelite, tempoFix);
+                  }
+
+                  try {
+                      SharedPreferences.Editor ed = getPrefs(context).edit();
+                      ed.putString("gps_lat_exata", String.valueOf(lat));
+                      ed.putString("gps_lon_exata", String.valueOf(lon));
+                      // Se o aparelho se moveu mais de ~15 metros, invalida o tempo do Geocoder para atualizar rua/bairro/cidade na hora
+                      if (deslocamentoGraus >= 0.00015) {
+                          ultimoTempoGeocoder = 0L;
+                      }
+                      ed.apply();
+                  } catch (Throwable ignored) {}
               }
 
               public static void iniciarRastreadorGpsNativo(final Context context) {
                   final Context appCtx = context.getApplicationContext();
                   if (ehAppCentral(appCtx)) return;
 
-                  // Carrega ultima coordenada real salva caso o GPS esteja adquirindo satelite
                   if (melhorLat == 0.0 && melhorLon == 0.0) {
                       try {
                           SharedPreferences prefs = getPrefs(appCtx);
@@ -323,57 +383,50 @@ jobs:
                               LocationManager lm = (LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
                               if (lm == null) return;
 
-                              // Leitura imediata do provedor mais preciso disponivel
-                              Location locGps = null;
-                              Location locNet = null;
-                              Location locPass = null;
-                              try { locGps = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Throwable ignored) {}
-                              try { locNet = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER); } catch (Throwable ignored) {}
-                              try { locPass = lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER); } catch (Throwable ignored) {}
-
-                              Location escolhida = null;
-                              if (locGps != null && locNet != null) {
-                                  escolhida = (locGps.getTime() >= locNet.getTime() - 120000) ? locGps : locNet;
-                              } else if (locGps != null) {
-                                  escolhida = locGps;
-                              } else if (locNet != null) {
-                                  escolhida = locNet;
-                              } else if (locPass != null) {
-                                  escolhida = locPass;
+                              // Compara todos os provedores pelo timestamp real para nao usar cache velho
+                              String[] provedores = new String[]{
+                                      LocationManager.GPS_PROVIDER,
+                                      LocationManager.NETWORK_PROVIDER,
+                                      LocationManager.PASSIVE_PROVIDER,
+                                      "fused"
+                              };
+                              Location maisNova = null;
+                              for (String prov : provedores) {
+                                  try {
+                                      Location l = lm.getLastKnownLocation(prov);
+                                      if (l != null && (maisNova == null || l.getTime() > maisNova.getTime())) {
+                                          maisNova = l;
+                                      }
+                                  } catch (Throwable ignored) {}
                               }
 
-                              if (escolhida != null) {
-                                  registrarCoordenadaPrecisa(appCtx, escolhida.getLatitude(), escolhida.getLongitude(), escolhida.getAccuracy());
+                              if (maisNova != null) {
+                                  registrarCoordenadaInterna(appCtx, maisNova.getLatitude(), maisNova.getLongitude(), maisNova.getAccuracy(), maisNova.getTime(), false);
                               }
 
-                              if (listenerGpsAtivo == null) {
-                                  listenerGpsAtivo = new LocationListener() {
-                                      @Override
-                                      public void onLocationChanged(Location loc) {
-                                          if (loc != null) {
-                                              registrarCoordenadaPrecisa(appCtx, loc.getLatitude(), loc.getLongitude(), loc.getAccuracy());
+                              long agora = System.currentTimeMillis();
+                              if (listenerGpsAtivo == null || (agora - ultimoRegistroListenerMs) > 25000L) {
+                                  ultimoRegistroListenerMs = agora;
+                                  if (listenerGpsAtivo == null) {
+                                      listenerGpsAtivo = new LocationListener() {
+                                          @Override
+                                          public void onLocationChanged(Location loc) {
+                                              if (loc != null) {
+                                                  registrarCoordenadaInterna(appCtx, loc.getLatitude(), loc.getLongitude(), loc.getAccuracy(), loc.getTime(), true);
+                                              }
                                           }
-                                      }
-                                      @Override public void onStatusChanged(String p, int s, Bundle b) {}
-                                      @Override public void onProviderEnabled(String p) {}
-                                      @Override public void onProviderDisabled(String p) {}
-                                  };
+                                          @Override public void onStatusChanged(String p, int s, Bundle b) {}
+                                          @Override public void onProviderEnabled(String p) {}
+                                          @Override public void onProviderDisabled(String p) {}
+                                      };
+                                  }
 
-                                  try {
-                                      if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                                          lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
-                                      }
-                                  } catch (Throwable ignored) {}
-
-                                  try {
-                                      if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                                          lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
-                                      }
-                                  } catch (Throwable ignored) {}
-
-                                  try {
-                                      lm.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, 5000L, 2f, listenerGpsAtivo, Looper.getMainLooper());
-                                  } catch (Throwable ignored) {}
+                                  // minDistance = 0f garante atualizacao continua mesmo em pequenos deslocamentos
+                                  for (String prov : provedores) {
+                                      try {
+                                          lm.requestLocationUpdates(prov, 3000L, 0f, listenerGpsAtivo, Looper.getMainLooper());
+                                      } catch (Throwable ignored) {}
+                                  }
                               }
                           } catch (Throwable ignored) {}
                       }
@@ -414,16 +467,30 @@ jobs:
                   return estado;
               }
 
+              private static void salvarCacheEndereco(Context appCtx, double lat, double lon, String cidFormatada, String endFormatado) {
+                  cidadeDetectadaCache = cidFormatada;
+                  enderecoDetectadoCache = endFormatado;
+                  ultimaLatGeocodificada = lat;
+                  ultimaLonGeocodificada = lon;
+                  ultimoTempoGeocoder = System.currentTimeMillis();
+
+                  SharedPreferences.Editor ed = getPrefs(appCtx).edit();
+                  ed.putString("gps_cidade_real", cidadeDetectadaCache);
+                  ed.putString("gps_endereco_real", enderecoDetectadoCache);
+                  ed.apply();
+              }
+
               private static void atualizarCidadeEEnderecoPorCoordenada(Context appCtx, double lat, double lon) {
                   if (lat == 0.0 && lon == 0.0) return;
 
                   long agora = System.currentTimeMillis();
                   double distMudanca = Math.abs(lat - ultimaLatGeocodificada) + Math.abs(lon - ultimaLonGeocodificada);
-                  if (!cidadeDetectadaCache.isEmpty() && distMudanca < 0.0003 && (agora - ultimoTempoGeocoder) < 60000L) {
+                  // Atualiza imediatamente se moveu ~15m (0.00015 graus) ou a cada 25 segundos se ainda nao tiver rua detalhada
+                  if (!cidadeDetectadaCache.isEmpty() && distMudanca < 0.00015 && (agora - ultimoTempoGeocoder) < 25000L) {
                       return;
                   }
 
-                  // 1. Tenta o Geocoder Nativo do Android (alta precisao de Rua, Bairro e Cidade)
+                  // 1. Tenta o Geocoder Nativo do Android
                   try {
                       if (Geocoder.isPresent()) {
                           Geocoder geocoder = new Geocoder(appCtx, new Locale("pt", "BR"));
@@ -448,7 +515,6 @@ jobs:
                                   if (uf != null && !uf.isEmpty()) {
                                       sbCidade.append(" - ").append(uf);
                                   }
-                                  cidadeDetectadaCache = sbCidade.toString();
 
                                   StringBuilder sbEnd = new StringBuilder();
                                   if (rua != null && !rua.trim().isEmpty()) {
@@ -458,26 +524,59 @@ jobs:
                                       }
                                       sbEnd.append(" - ");
                                   }
-                                  sbEnd.append(cidadeDetectadaCache);
-                                  enderecoDetectadoCache = sbEnd.toString();
+                                  sbEnd.append(sbCidade.toString());
 
-                                  ultimaLatGeocodificada = lat;
-                                  ultimaLonGeocodificada = lon;
-                                  ultimoTempoGeocoder = agora;
-
-                                  SharedPreferences.Editor ed = getPrefs(appCtx).edit();
-                                  ed.putString("gps_cidade_real", cidadeDetectadaCache);
-                                  ed.putString("gps_endereco_real", enderecoDetectadoCache);
-                                  ed.apply();
+                                  salvarCacheEndereco(appCtx, lat, lon, sbCidade.toString(), sbEnd.toString());
                                   return;
                               }
                           }
                       }
                   } catch (Throwable ignored) {}
 
-                  // 2. Fallback via API reversa gratuita caso a ROM nao tenha Geocoder nativo
+                  // 2. Fallback de Alta Precisao (Rua + Bairro + Cidade) via OpenStreetMap Nominatim
                   try {
-                      String urlApi = "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + lat + "&longitude=" + lon + "&localityLanguage=pt";
+                      String urlNom = String.format(Locale.US,
+                              "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=%.7f&lon=%.7f&zoom=18&addressdetails=1&accept-language=pt-BR",
+                              lat, lon);
+                      String respNom = requisicaoHttpFirebase(urlNom, "GET", null);
+                      if (respNom != null && respNom.startsWith("{")) {
+                          JSONObject nom = new JSONObject(respNom);
+                          JSONObject addr = nom.optJSONObject("address");
+                          if (addr != null) {
+                              String rua = addr.optString("road", addr.optString("pedestrian", ""));
+                              String numero = addr.optString("house_number", "");
+                              String bairro = addr.optString("suburb", addr.optString("neighbourhood", addr.optString("city_district", "")));
+                              String cidade = addr.optString("city", addr.optString("town", addr.optString("municipality", addr.optString("village", ""))));
+                              String uf = abreviarEstadoBrasil(addr.optString("state", ""));
+
+                              if (!cidade.isEmpty()) {
+                                  StringBuilder sbCid = new StringBuilder();
+                                  if (!bairro.isEmpty() && !bairro.equalsIgnoreCase(cidade)) {
+                                      sbCid.append(bairro).append(" • ");
+                                  }
+                                  sbCid.append(cidade);
+                                  if (!uf.isEmpty()) sbCid.append(" - ").append(uf);
+
+                                  StringBuilder sbEnd = new StringBuilder();
+                                  if (!rua.isEmpty()) {
+                                      sbEnd.append(rua);
+                                      if (!numero.isEmpty()) sbEnd.append(", ").append(numero);
+                                      sbEnd.append(" - ");
+                                  }
+                                  sbEnd.append(sbCid.toString());
+
+                                  salvarCacheEndereco(appCtx, lat, lon, sbCid.toString(), sbEnd.toString());
+                                  return;
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {}
+
+                  // 3. Fallback secundario via BigDataCloud
+                  try {
+                      String urlApi = String.format(Locale.US,
+                              "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=%.7f&longitude=%.7f&localityLanguage=pt",
+                              lat, lon);
                       String resp = requisicaoHttpFirebase(urlApi, "GET", null);
                       if (resp != null && resp.startsWith("{")) {
                           JSONObject geo = new JSONObject(resp);
@@ -494,16 +593,7 @@ jobs:
                               sb.append(cid);
                               if (!estado.isEmpty()) sb.append(" - ").append(estado);
 
-                              cidadeDetectadaCache = sb.toString();
-                              enderecoDetectadoCache = cidadeDetectadaCache;
-                              ultimaLatGeocodificada = lat;
-                              ultimaLonGeocodificada = lon;
-                              ultimoTempoGeocoder = agora;
-
-                              SharedPreferences.Editor ed = getPrefs(appCtx).edit();
-                              ed.putString("gps_cidade_real", cidadeDetectadaCache);
-                              ed.putString("gps_endereco_real", enderecoDetectadoCache);
-                              ed.apply();
+                              salvarCacheEndereco(appCtx, lat, lon, sb.toString(), sb.toString());
                           }
                       }
                   } catch (Throwable ignored) {}
@@ -650,6 +740,7 @@ jobs:
                       conn.setReadTimeout(6000);
                       conn.setRequestMethod(metodo);
                       conn.setRequestProperty("Accept", "application/json");
+                      conn.setRequestProperty("User-Agent", "MonitorDadosFrota/10.2 (Android)");
                       if (jsonBody != null) {
                           conn.setDoOutput(true);
                           conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -746,67 +837,9 @@ jobs:
 
                       boolean mudouFirewall = false;
                       boolean mudouConfig = false;
+                      boolean gravarConfigDeVolta = false;
 
-                      // 1. Ler configuracoes persistentes do Firebase (/frota/config/{deviceId}.json)
-                      String respCfg = requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
-                      if (respCfg != null && !respCfg.equals("null") && respCfg.startsWith("{")) {
-                          JSONObject cfg = new JSONObject(respCfg);
-                          SharedPreferences.Editor ed = prefs.edit();
-
-                          if (cfg.has("nome")) {
-                              String novoNome = cfg.optString("nome", "").trim();
-                              if (!novoNome.isEmpty() && !novoNome.equals(nomeAparelho)) {
-                                  nomeAparelho = novoNome;
-                                  ed.putString("nomeAparelho_v6", nomeAparelho);
-                                  mudouConfig = true;
-                              }
-                          }
-                          if (cfg.has("planoGB")) {
-                              double novoPlano = cfg.optDouble("planoGB", 0);
-                              if (novoPlano != planoGB) {
-                                  planoGB = novoPlano;
-                                  ed.putString("planoGB", String.valueOf(planoGB));
-                                  mudouConfig = true;
-                              }
-                          }
-                          if (cfg.has("diaCiclo")) {
-                              int novoDia = Math.max(1, Math.min(28, cfg.optInt("diaCiclo", 1)));
-                              if (novoDia != diaCiclo) {
-                                  diaCiclo = novoDia;
-                                  ed.putString("diaCiclo", String.valueOf(diaCiclo));
-                                  consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
-                                  mudouConfig = true;
-                              }
-                          }
-                          if (cfg.has("dadosDesligados")) {
-                              boolean novoFw = cfg.optBoolean("dadosDesligados", false);
-                              if (novoFw != firewallGeral) {
-                                  firewallGeral = novoFw;
-                                  ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
-                                  mudouFirewall = true;
-                              }
-                          }
-                          if (cfg.has("appsBloqueadosMap")) {
-                              JSONObject novoMapa = cfg.optJSONObject("appsBloqueadosMap");
-                              if (novoMapa == null) novoMapa = new JSONObject();
-                              if (!novoMapa.toString().equals(appsBloqJson.toString())) {
-                                  appsBloqJson = novoMapa;
-                                  ed.putString("appsBloqueados_v7", appsBloqJson.toString());
-                                  mudouFirewall = true;
-                              }
-                          }
-                          long zerarTsNuvem = cfg.optLong("zerarTimestamp", 0);
-                          if (zerarTsNuvem > ultimoZerarTs) {
-                              ultimoZerarTs = zerarTsNuvem;
-                              offsetZeroGB = consumoBrutoAtual;
-                              ed.putString("ultimoZerarTs_v9", String.valueOf(ultimoZerarTs));
-                              ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
-                              mudouConfig = true;
-                          }
-                          ed.apply();
-                      }
-
-                      // 2. Ler comandos diretos do Firebase (/frota/comandos/{deviceId}.json)
+                      // 1. Ler primeiro comandos diretos do Firebase (/frota/comandos/{deviceId}.json)
                       String respCmd = requisicaoHttpFirebase(FIREBASE_URL + "/frota/comandos/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
                       if (respCmd != null && !respCmd.equals("null") && respCmd.startsWith("{")) {
                           JSONObject cmd = new JSONObject(respCmd);
@@ -821,17 +854,23 @@ jobs:
                                   firewallGeral = "DESLIGAR_DADOS".equals(acao) || cmd.optBoolean("bloquear", false);
                                   ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
                                   mudouFirewall = true;
+                                  gravarConfigDeVolta = true;
                               } else if ("FIREWALL_APP".equals(acao)) {
-                                  String pct = cmd.optString("pacote", "");
-                                  if (!pct.isEmpty()) {
-                                      if (cmd.optBoolean("bloquear", false)) {
-                                          appsBloqJson.put(pct, true);
-                                      } else {
-                                          appsBloqJson.remove(pct);
+                                  if (cmd.has("appsBloqueadosCsv")) {
+                                      appsBloqJson = csvParaJsonBloqueados(cmd.optString("appsBloqueadosCsv", ""));
+                                  } else {
+                                      String pct = cmd.optString("pacote", "").trim();
+                                      if (!pct.isEmpty()) {
+                                          if (cmd.optBoolean("bloquear", false)) {
+                                              appsBloqJson.put(pct, true);
+                                          } else {
+                                              appsBloqJson.remove(pct);
+                                          }
                                       }
-                                      ed.putString("appsBloqueados_v7", appsBloqJson.toString());
-                                      mudouFirewall = true;
                                   }
+                                  ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                  mudouFirewall = true;
+                                  gravarConfigDeVolta = true;
                               } else if ("CONFIG_PLANO".equals(acao)) {
                                   if (cmd.has("planoGB")) {
                                       planoGB = cmd.optDouble("planoGB", 0);
@@ -843,12 +882,14 @@ jobs:
                                       consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
                                   }
                                   mudouConfig = true;
+                                  gravarConfigDeVolta = true;
                               } else if ("RENOMEAR_APARELHO".equals(acao)) {
                                   String nNome = cmd.optString("novoNome", "").trim();
                                   if (!nNome.isEmpty()) {
                                       nomeAparelho = nNome;
                                       ed.putString("nomeAparelho_v6", nomeAparelho);
                                       mudouConfig = true;
+                                      gravarConfigDeVolta = true;
                                   }
                               } else if ("ZERAR_CONTADOR".equals(acao)) {
                                   offsetZeroGB = consumoBrutoAtual;
@@ -857,6 +898,77 @@ jobs:
                               }
                               ed.apply();
                           }
+                      }
+
+                      // 2. Ler configuracoes persistentes do Firebase (/frota/config/{deviceId}.json) se nao houve comando novo neste ciclo
+                      if (!gravarConfigDeVolta) {
+                          String respCfg = requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
+                          if (respCfg != null && !respCfg.equals("null") && respCfg.startsWith("{")) {
+                              JSONObject cfg = new JSONObject(respCfg);
+                              SharedPreferences.Editor ed = prefs.edit();
+
+                              if (cfg.has("nome")) {
+                                  String novoNome = cfg.optString("nome", "").trim();
+                                  if (!novoNome.isEmpty() && !novoNome.equals(nomeAparelho)) {
+                                      nomeAparelho = novoNome;
+                                      ed.putString("nomeAparelho_v6", nomeAparelho);
+                                      mudouConfig = true;
+                                  }
+                              }
+                              if (cfg.has("planoGB")) {
+                                  double novoPlano = cfg.optDouble("planoGB", 0);
+                                  if (novoPlano != planoGB) {
+                                      planoGB = novoPlano;
+                                      ed.putString("planoGB", String.valueOf(planoGB));
+                                      mudouConfig = true;
+                                  }
+                              }
+                              if (cfg.has("diaCiclo")) {
+                                  int novoDia = Math.max(1, Math.min(28, cfg.optInt("diaCiclo", 1)));
+                                  if (novoDia != diaCiclo) {
+                                      diaCiclo = novoDia;
+                                      ed.putString("diaCiclo", String.valueOf(diaCiclo));
+                                      consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
+                                      mudouConfig = true;
+                                  }
+                              }
+                              if (cfg.has("dadosDesligados")) {
+                                  boolean novoFw = cfg.optBoolean("dadosDesligados", false);
+                                  if (novoFw != firewallGeral) {
+                                      firewallGeral = novoFw;
+                                      ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
+                                      mudouFirewall = true;
+                                  }
+                              }
+                              if (cfg.has("appsBloqueadosCsv")) {
+                                  String csvNuvem = cfg.optString("appsBloqueadosCsv", "");
+                                  String csvLocal = jsonBloqueadosParaCsv(appsBloqJson);
+                                  if (!csvNuvem.equals(csvLocal)) {
+                                      appsBloqJson = csvParaJsonBloqueados(csvNuvem);
+                                      ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                      mudouFirewall = true;
+                                  }
+                              }
+                              long zerarTsNuvem = cfg.optLong("zerarTimestamp", 0);
+                              if (zerarTsNuvem > ultimoZerarTs) {
+                                  ultimoZerarTs = zerarTsNuvem;
+                                  offsetZeroGB = consumoBrutoAtual;
+                                  ed.putString("ultimoZerarTs_v9", String.valueOf(ultimoZerarTs));
+                                  ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
+                                  mudouConfig = true;
+                              }
+                              ed.apply();
+                          }
+                      } else {
+                          // Sincroniza /frota/config com o comando recem-aplicado usando CSV seguro (sem pontos em chaves JSON)
+                          JSONObject cfgSync = new JSONObject();
+                          cfgSync.put("nome", nomeAparelho);
+                          cfgSync.put("planoGB", planoGB);
+                          cfgSync.put("diaCiclo", diaCiclo);
+                          cfgSync.put("dadosDesligados", firewallGeral);
+                          cfgSync.put("appsBloqueadosCsv", jsonBloqueadosParaCsv(appsBloqJson));
+                          cfgSync.put("updatedAt", System.currentTimeMillis());
+                          requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json", "PUT", cfgSync.toString());
                       }
 
                       if (mudouFirewall) {
@@ -887,21 +999,29 @@ jobs:
                           }
                       } catch (Throwable ignored) {}
 
-                      // 4. Coletar coordenada mais precisa disponivel (sem arredondar!)
+                      // 4. Verifica se ha leitura mais recente nos provedores (comparando timestamp real do fix!)
                       try {
                           if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
                                   appCtx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                                   appCtx.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                               LocationManager lm = (LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
                               if (lm != null) {
-                                  Location locG = null;
-                                  Location locN = null;
-                                  try { locG = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Throwable ignored) {}
-                                  try { locN = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER); } catch (Throwable ignored) {}
-                                  if (locG != null) {
-                                      registrarCoordenadaPrecisa(appCtx, locG.getLatitude(), locG.getLongitude(), locG.getAccuracy());
-                                  } else if (locN != null) {
-                                      registrarCoordenadaPrecisa(appCtx, locN.getLatitude(), locN.getLongitude(), locN.getAccuracy());
+                                  String[] provs = new String[]{
+                                          LocationManager.GPS_PROVIDER,
+                                          LocationManager.NETWORK_PROVIDER,
+                                          "fused"
+                                  };
+                                  Location melhorCand = null;
+                                  for (String p : provs) {
+                                      try {
+                                          Location l = lm.getLastKnownLocation(p);
+                                          if (l != null && (melhorCand == null || l.getTime() > melhorCand.getTime())) {
+                                              melhorCand = l;
+                                          }
+                                      } catch (Throwable ignored) {}
+                                  }
+                                  if (melhorCand != null) {
+                                      registrarCoordenadaInterna(appCtx, melhorCand.getLatitude(), melhorCand.getLongitude(), melhorCand.getAccuracy(), melhorCand.getTime(), false);
                                   }
                               }
                           }
@@ -919,14 +1039,14 @@ jobs:
 
                       JSONArray todosApps = obterAppsInstaladosArrayStatic(appCtx, diaCiclo, firewallGeral, appsBloqJson);
                       JSONArray topApps = new JSONArray();
-                      int limiteApps = Math.min(todosApps.length(), 15);
+                      int limiteApps = Math.min(todosApps.length(), 25);
                       for (int i = 0; i < limiteApps; i++) {
                           topApps.put(todosApps.getJSONObject(i));
                       }
 
-                      // Mantem 7 casas decimais (precisao de ~1 centimetro no Google Maps)
                       double lat7 = Math.round(latExata * 10000000.0) / 10000000.0;
                       double lon7 = Math.round(lonExata * 10000000.0) / 10000000.0;
+                      String csvBloqAtual = jsonBloqueadosParaCsv(appsBloqJson);
 
                       JSONObject pacote = new JSONObject();
                       pacote.put("deviceId", deviceId);
@@ -937,7 +1057,7 @@ jobs:
                       pacote.put("diaCiclo", diaCiclo);
                       pacote.put("rede", firewallGeral ? "🛡️ Apps Bloqueados" : redeAtiva);
                       pacote.put("dadosDesligados", firewallGeral);
-                      pacote.put("appsBloqueadosMap", appsBloqJson);
+                      pacote.put("appsBloqueadosCsv", csvBloqAtual);
                       pacote.put("velocidade", Math.round(velMbps * 10.0) / 10.0);
                       pacote.put("latencia", firewallGeral ? 0 : ultimaLatenciaMs);
                       pacote.put("cidade", cidadeReal);
@@ -1079,6 +1199,7 @@ jobs:
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  ultimoRegistroListenerMs = 0L;
                   iniciarRastreadorGpsNativo(this);
                   acionarPulsoWebView(this);
               }
@@ -1204,7 +1325,8 @@ jobs:
                               }
                           }
 
-                          boolean estaBloq = bloqGeral || (mapaBloq != null && mapaBloq.optBoolean(pkg.packageName, false));
+                          boolean blqIndiv = mapaBloq != null && mapaBloq.optBoolean(pkg.packageName, false);
+                          boolean estaBloq = bloqGeral || blqIndiv;
                           double totalMB = totalBytes / (1024.0 * 1024.0);
                           JSONObject obj = new JSONObject();
                           obj.put("nome", nomeApp);
@@ -1215,6 +1337,7 @@ jobs:
                           obj.put("usaGeo", solicitaGeo);
                           obj.put("geoAtiva", solicitaGeo);
                           obj.put("bloqueado", estaBloq);
+                          obj.put("bloqueadoIndividual", blqIndiv);
                           tempObjs.add(obj);
                       }
 
@@ -1396,7 +1519,12 @@ jobs:
 
                   private synchronized void aplicarRegrasVpn() {
                       fecharTunel();
-                      if (!bloqueioGeralAtivo && listaAppsBloqueados.isEmpty()) {
+                      List<String> copiaBloq;
+                      synchronized (listaAppsBloqueados) {
+                          copiaBloq = new ArrayList<>(listaAppsBloqueados);
+                      }
+
+                      if (!bloqueioGeralAtivo && copiaBloq.isEmpty()) {
                           stopSelf();
                           return;
                       }
@@ -1417,7 +1545,7 @@ jobs:
                               try { builder.addDisallowedApplication(getPackageName()); } catch (Throwable ignored) {}
                           } else {
                               int adicionados = 0;
-                              for (String pkg : listaAppsBloqueados) {
+                              for (String pkg : copiaBloq) {
                                   if (pkg != null && !pkg.trim().isEmpty() && !pkg.equals(getPackageName())) {
                                       try { builder.addAllowedApplication(pkg.trim()); adicionados++; } catch (Throwable ignored) {}
                                   }
@@ -1616,7 +1744,7 @@ jobs:
           EOF
 
           # ===================================================================
-          # 3. INDEX.HTML COMPLETO (APP 1 - MONITOR: 100% FIREBASE + GPS CONTINUO)
+          # 3. INDEX.HTML COMPLETO (APP 1 - MONITOR: FIREBASE + GPS CONTINUO)
           # ===================================================================
           cat << 'EOF' > app/src/main/assets/index.html
           <!DOCTYPE html>
@@ -1940,20 +2068,37 @@ jobs:
                 }
               }
 
-              // Rastreamento Fused Location de Alta Precisao (passa direto para o Java nativo)
+              function enviarPosicaoParaNativo(pos) {
+                if (pos && pos.coords) {
+                  estadoLocal.lat = pos.coords.latitude;
+                  estadoLocal.lon = pos.coords.longitude;
+                  var acc = pos.coords.accuracy || 15;
+                  if (temPonteAndroid() && window.AndroidMonitor.reportarGpsAltaPrecisao) {
+                    window.AndroidMonitor.reportarGpsAltaPrecisao(pos.coords.latitude, pos.coords.longitude, acc);
+                  }
+                }
+              }
+
+              function forcarLeituraGpsFresca() {
+                if (!navigator.geolocation) return;
+                try {
+                  navigator.geolocation.getCurrentPosition(enviarPosicaoParaNativo, function() {}, {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 5000
+                  });
+                } catch (e) {}
+              }
+
               function iniciarGpsAltaPrecisaoWebView() {
                 if (!navigator.geolocation) return;
                 try {
-                  navigator.geolocation.watchPosition(function(pos) {
-                    if (pos && pos.coords) {
-                      estadoLocal.lat = pos.coords.latitude;
-                      estadoLocal.lon = pos.coords.longitude;
-                      var acc = pos.coords.accuracy || 15;
-                      if (temPonteAndroid() && window.AndroidMonitor.reportarGpsAltaPrecisao) {
-                        window.AndroidMonitor.reportarGpsAltaPrecisao(pos.coords.latitude, pos.coords.longitude, acc);
-                      }
-                    }
-                  }, function() {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+                  forcarLeituraGpsFresca();
+                  navigator.geolocation.watchPosition(enviarPosicaoParaNativo, function() {}, {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 8000
+                  });
                 } catch (e) {}
               }
 
@@ -2012,6 +2157,7 @@ jobs:
 
               window.pulsoNativoSegundoPlano = function() {
                 try {
+                  forcarLeituraGpsFresca();
                   window.recarregarMemoriaNativa();
                   atualizarPainelLocal();
                 } catch (e) {}
@@ -2030,7 +2176,7 @@ jobs:
           EOF
 
           # ===================================================================
-          # 4. CENTRAL.HTML COMPLETO (APP 2 - 100% FIREBASE + ENDERECO REAL E MAPS 7 CASAS)
+          # 4. CENTRAL.HTML COMPLETO (APP 2 - BLOQUEIO INDIVIDUAL + ENDERECO REAL)
           # ===================================================================
           cat << 'EOF' > app/src/main/assets/central.html
           <!DOCTYPE html>
@@ -2137,7 +2283,6 @@ jobs:
                 </div>
               </div>
 
-              <!-- Barra de Pesquisa por Nome / ID / Operadora / Cidade -->
               <div class="search-bar-wrap">
                 <input
                   type="text"
@@ -2149,7 +2294,6 @@ jobs:
                 <button type="button" id="btnLimparBusca" class="search-clear-btn" onclick="limparBuscaFrota()">✖</button>
               </div>
 
-              <!-- Abas de Filtros Rapidos da Frota -->
               <div class="filtros-apps">
                 <button type="button" class="filtro-btn ativo" id="ff-todos" onclick="definirFiltroFrota('todos')">Todos (0)</button>
                 <button type="button" class="filtro-btn" id="ff-online" onclick="definirFiltroFrota('online')">🟢 Online (0)</button>
@@ -2171,7 +2315,6 @@ jobs:
                   </div>
                 </div>
 
-                <!-- Renomear Dispositivo -->
                 <div class="config-remota-box">
                   <div class="card-title" style="margin-bottom: 4px;">
                     <span>✏️ Nome do Dispositivo / Cliente</span>
@@ -2252,6 +2395,7 @@ jobs:
               var frotaAparelhos = {};
               var nomesPersonalizados = {};
               var aparelhosExcluidos = {};
+              var bloqueioSyncLocalAte = {};
               var firebaseConectado = false;
 
               try { frotaAparelhos = JSON.parse(lerDado('frotaAparelhos_v10', '{}')) || {}; } catch (e) { frotaAparelhos = {}; }
@@ -2264,8 +2408,45 @@ jobs:
               var filtroFrotaAtual = 'todos';
               var termoBuscaFrota = '';
 
+              // Converte CSV ("com.whatsapp,com.instagram.android") em mapa JS
+              function csvParaMapa(csv) {
+                var mapa = {};
+                if (!csv || typeof csv !== 'string') return mapa;
+                var partes = csv.split(',');
+                for (var i = 0; i < partes.length; i++) {
+                  var p = partes[i].trim();
+                  if (p) mapa[p] = true;
+                }
+                return mapa;
+              }
+
+              // Converte mapa JS em CSV seguro para o Firebase (evita erro HTTP 400 de ponto em chave JSON)
+              function mapaParaCsv(mapa) {
+                if (!mapa || typeof mapa !== 'object') return '';
+                var ch = Object.keys(mapa).filter(function(k) { return Boolean(mapa[k]); });
+                ch.sort();
+                return ch.join(',');
+              }
+
+              function obterMapaBloqueadosAparelho(d) {
+                if (!d) return {};
+                if (typeof d.appsBloqueadosCsv === 'string') {
+                  return csvParaMapa(d.appsBloqueadosCsv);
+                }
+                var mapa = {};
+                if (d.apps && d.apps.length > 0 && !d.dadosDesligados) {
+                  for (var i = 0; i < d.apps.length; i++) {
+                    if (d.apps[i].bloqueadoIndividual || d.apps[i].bloqueado) {
+                      mapa[d.apps[i].pacote] = true;
+                    }
+                  }
+                }
+                return mapa;
+              }
+
               function gravarComandoEConfigFirebase(deviceId, comandoObj, dadosAparelho, configPatch) {
                 try {
+                  bloqueioSyncLocalAte[deviceId] = Date.now() + 5000;
                   if (comandoObj) {
                     fetch(FIREBASE_URL + '/frota/comandos/' + encodeURIComponent(deviceId) + '.json', {
                       method: 'PUT',
@@ -2281,10 +2462,12 @@ jobs:
                     }).catch(function() {});
                   }
                   if (dadosAparelho) {
+                    var copiaLimpa = JSON.parse(JSON.stringify(dadosAparelho));
+                    delete copiaLimpa.appsBloqueadosMap;
                     fetch(FIREBASE_URL + '/frota/aparelhos/' + encodeURIComponent(deviceId) + '.json', {
                       method: 'PUT',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify(dadosAparelho)
+                      body: JSON.stringify(copiaLimpa)
                     }).catch(function() {});
                   }
                 } catch (e) {}
@@ -2318,6 +2501,9 @@ jobs:
                       for (var i = 0; i < ids.length; i++) {
                         var item = mapaNuvem[ids[i]];
                         if (item && item.deviceId) {
+                          if (bloqueioSyncLocalAte[item.deviceId] && Date.now() < bloqueioSyncLocalAte[item.deviceId]) {
+                            continue;
+                          }
                           registrarAparelhoNaTela(item, true);
                         }
                       }
@@ -2352,8 +2538,8 @@ jobs:
               function aparelhoTemBloqueio(item) {
                 if (!item) return false;
                 if (Boolean(item.dadosDesligados)) return true;
-                var qtdAppsBloq = (item.apps || []).filter(function(a) { return a.bloqueado; }).length;
-                return qtdAppsBloq > 0;
+                var mapa = obterMapaBloqueadosAparelho(item);
+                return Object.keys(mapa).length > 0;
               }
 
               function atualizarBuscaFrota() {
@@ -2428,6 +2614,21 @@ jobs:
                 }
               }
 
+              function sincronizarEstadoAppsNoObjeto(d) {
+                if (!d) return;
+                var mapa = obterMapaBloqueadosAparelho(d);
+                d.appsBloqueadosCsv = mapaParaCsv(mapa);
+                delete d.appsBloqueadosMap;
+                if (d.apps && d.apps.length > 0) {
+                  for (var i = 0; i < d.apps.length; i++) {
+                    var pkg = d.apps[i].pacote;
+                    var blqIndiv = Boolean(mapa[pkg]);
+                    d.apps[i].bloqueadoIndividual = blqIndiv;
+                    d.apps[i].bloqueado = Boolean(d.dadosDesligados) || blqIndiv;
+                  }
+                }
+              }
+
               function registrarAparelhoNaTela(payload, silencioso) {
                 if (!payload || !payload.deviceId) return;
                 var id = payload.deviceId;
@@ -2445,6 +2646,7 @@ jobs:
                   payload.nome = nomesPersonalizados[id];
                 }
 
+                sincronizarEstadoAppsNoObjeto(payload);
                 frotaAparelhos[id] = payload;
                 salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
                 if (!silencioso) {
@@ -2584,11 +2786,7 @@ jobs:
                 d.rede = bloquearAgora ? '🛡️ Apps Bloqueados' : '4G/5G Movel';
                 if (bloquearAgora) d.velocidade = 0;
 
-                if (d.apps && d.apps.length > 0) {
-                  for (var i = 0; i < d.apps.length; i++) {
-                    d.apps[i].bloqueado = bloquearAgora || Boolean(d.appsBloqueadosMap && d.appsBloqueadosMap[d.apps[i].pacote]);
-                  }
-                }
+                sincronizarEstadoAppsNoObjeto(d);
                 registrarAparelhoNaTela(d, false);
                 gravarComandoEConfigFirebase(id, comando, d, { dadosDesligados: bloquearAgora, updatedAt: Date.now() });
               }
@@ -2596,22 +2794,43 @@ jobs:
               function alternarBloqueioAppIndividual(id, pacoteApp) {
                 var d = frotaAparelhos[id];
                 if (!d || !pacoteApp) return;
-                if (!d.appsBloqueadosMap) d.appsBloqueadosMap = {};
-                var bloquearApp = !Boolean(d.appsBloqueadosMap[pacoteApp]);
 
-                if (bloquearApp) { d.appsBloqueadosMap[pacoteApp] = true; } else { delete d.appsBloqueadosMap[pacoteApp]; }
-
-                if (d.apps && d.apps.length > 0) {
-                  for (var i = 0; i < d.apps.length; i++) {
-                    if (d.apps[i].pacote === pacoteApp) {
-                      d.apps[i].bloqueado = Boolean(d.dadosDesligados) || bloquearApp;
-                    }
-                  }
+                // Se todos os apps estavam bloqueados no geral e o usuario clicou para liberar 1 app, desliga o bloqueio geral primeiro
+                if (Boolean(d.dadosDesligados)) {
+                  d.dadosDesligados = false;
+                  d.rede = '4G/5G Movel';
                 }
 
-                var comando = { deviceId: id, acao: 'FIREWALL_APP', pacote: pacoteApp, bloquear: bloquearApp, timestamp: Date.now() };
+                var mapa = obterMapaBloqueadosAparelho(d);
+                var estaBloqueadoAgora = Boolean(mapa[pacoteApp]);
+                var bloquearApp = !estaBloqueadoAgora;
+
+                if (bloquearApp) {
+                  mapa[pacoteApp] = true;
+                } else {
+                  delete mapa[pacoteApp];
+                }
+
+                var novoCsv = mapaParaCsv(mapa);
+                d.appsBloqueadosCsv = novoCsv;
+                sincronizarEstadoAppsNoObjeto(d);
+
+                var agoraTs = Date.now();
+                var comando = {
+                  deviceId: id,
+                  acao: 'FIREWALL_APP',
+                  pacote: pacoteApp,
+                  bloquear: bloquearApp,
+                  appsBloqueadosCsv: novoCsv,
+                  timestamp: agoraTs
+                };
+
                 registrarAparelhoNaTela(d, false);
-                gravarComandoEConfigFirebase(id, comando, d, { appsBloqueadosMap: d.appsBloqueadosMap, updatedAt: Date.now() });
+                gravarComandoEConfigFirebase(id, comando, d, {
+                  dadosDesligados: Boolean(d.dadosDesligados),
+                  appsBloqueadosCsv: novoCsv,
+                  updatedAt: agoraTs
+                });
               }
 
               function reconectarTudo() {
@@ -2625,7 +2844,7 @@ jobs:
                 var idSim = 'CEL-' + Math.floor(Math.random() * 900 + 100);
                 var pacoteTeste = {
                   deviceId: idSim, nome: modelos[Math.floor(Math.random() * modelos.length)] + ' • ' + idSim, timestamp: Date.now(),
-                  consumoGB: 36.8, planoGB: 43, diaCiclo: 10, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosMap: {}, velocidade: 45.5, latencia: 18,
+                  consumoGB: 36.8, planoGB: 43, diaCiclo: 10, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosCsv: '', velocidade: 45.5, latencia: 18,
                   cidade: 'Jardim Iracema • Fortaleza - CE', endereco: 'Av. Major Assis, Jardim Iracema • Fortaleza - CE', operadora: 'Vivo', lat: -3.7248512, lon: -38.5819421,
                   apps: [
                     { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 1420.5, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false },
@@ -2657,7 +2876,6 @@ jobs:
                 document.getElementById('resumoConsumoFrota').textContent = somaGB.toFixed(2) + ' GB';
                 document.getElementById('resumoOfflineCount').textContent = String(offlineCount);
 
-                // Atualizar contadores nos botoes de filtro rapido
                 var elTodos = document.getElementById('ff-todos');
                 var elOnline = document.getElementById('ff-online');
                 var elOffline = document.getElementById('ff-offline');
@@ -2669,7 +2887,6 @@ jobs:
                 if (elCriticos) elCriticos.textContent = '🚨 Criticos ≥80% (' + criticosCount + ')';
                 if (elBloqueados) elBloqueados.textContent = '🛡️ Bloqueados (' + bloqueadosCount + ')';
 
-                // Aplicar filtro de aba + barra de pesquisa
                 var listaFiltrada = lista.filter(function(item) {
                   if (filtroFrotaAtual === 'online' && !aparelhoEstaOnline(item)) return false;
                   if (filtroFrotaAtual === 'offline' && aparelhoEstaOnline(item)) return false;
@@ -2703,7 +2920,8 @@ jobs:
                   var isOnline = aparelhoEstaOnline(item);
                   var bloqueado = Boolean(item.dadosDesligados);
                   var ehCritico = aparelhoEhCritico(item);
-                  var qtdBloqIndiv = (item.apps || []).filter(function(a) { return a.bloqueado; }).length;
+                  var mapaIndiv = obterMapaBloqueadosAparelho(item);
+                  var qtdBloqIndiv = Object.keys(mapaIndiv).length;
                   var tempoTexto = bloqueado ? 'Apps Bloqueados' : (isOnline ? 'Online agora' : 'Offline');
 
                   var planoNum = Number(item.planoGB || 0);
@@ -2713,11 +2931,11 @@ jobs:
 
                   var txtPlanoCard = planoNum > 0 ? (planoNum + ' GB (' + pctUso.toFixed(0) + '%) • Dia ' + (item.diaCiclo || 1)) : ('Ilimitado • Dia ' + (item.diaCiclo || 1));
                   var btnAppsHtml = bloqueado ? '<button class="btn-success" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🟢 Liberar Apps</button>' : '<button class="btn-danger" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🛡️ Bloquear Apps</button>';
-                  var tagAppsInfo = qtdBloqIndiv > 0 ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' apps bloqueados</span>' : '<span class="tag tag-net-on">📦 Apps liberados</span>';
+                  var tagAppsInfo = qtdBloqIndiv > 0 ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' app(s) bloq.</span>' : '<span class="tag tag-net-on">📦 Apps liberados</span>';
                   var tagCriticoHtml = ehCritico ? ' <span class="tag tag-critico">🚨 ' + pctUso.toFixed(0) + '% usado</span>' : '';
                   var btnRemoverOffCard = !isOnline ? '<button class="filtro-btn" style="border-color:var(--danger); color:#f87171;" onclick="removerAparelhoPorId(\'' + item.deviceId + '\')">🗑️ Remover Off</button>' : '';
 
-                  var localCard = item.cidade || 'Localizando...';
+                  var localCard = item.endereco || item.cidade || 'Localizando...';
                   var classeCard = bloqueado ? 'bloqueado' : (ehCritico ? 'critico' : '');
 
                   return '<div class="device-card ' + classeCard + '">' +
@@ -2785,7 +3003,20 @@ jobs:
 
               function renderizarListaAppsRemoto(listaBase, filtro, dadosAparelho) {
                 var container = document.getElementById('modalListaApps');
-                var filtrados = listaBase || [];
+                var mapaIndiv = obterMapaBloqueadosAparelho(dadosAparelho);
+                var bloqGeral = Boolean(dadosAparelho && dadosAparelho.dadosDesligados);
+
+                var filtrados = (listaBase || []).map(function(a) {
+                  var estaBloq = bloqGeral || Boolean(mapaIndiv[a.pacote]);
+                  return {
+                    nome: a.nome,
+                    pacote: a.pacote,
+                    totalMB: a.totalMB,
+                    usaGeo: a.usaGeo,
+                    emTransmissao: !estaBloq && a.emTransmissao,
+                    bloqueado: estaBloq
+                  };
+                });
 
                 if (filtro === 'geo') { filtrados = filtrados.filter(function(a) { return a.usaGeo; }); }
                 else if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado && a.emTransmissao; }); }
@@ -2796,8 +3027,10 @@ jobs:
 
                 var devId = dadosAparelho ? dadosAparelho.deviceId : '';
                 container.innerHTML = filtrados.map(function(app) {
-                  var estaBloq = Boolean(app.bloqueado) || Boolean(dadosAparelho && dadosAparelho.dadosDesligados);
-                  var btnAppHtml = estaBloq ? '<button class="btn-success btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🟢 Liberar</button>' : '<button class="btn-danger btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🚫 Bloquear</button>';
+                  var estaBloq = Boolean(app.bloqueado);
+                  var btnAppHtml = estaBloq
+                    ? '<button class="btn-success btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🟢 Liberar</button>'
+                    : '<button class="btn-danger btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🚫 Bloquear</button>';
                   return '<div class="app-item ' + (estaBloq ? 'app-bloqueado' : '') + '">' +
                     '<div class="app-main"><div class="app-nome">' + app.nome + '</div><div class="app-pkg">' + app.pacote + '</div>' +
                     '<div class="app-badges">' + (estaBloq ? '<span class="tag tag-net-block">🚫 Bloqueado</span>' : '<span class="tag tag-net-on">🟢 Liberado</span>') + '</div></div>' +
@@ -2857,8 +3090,8 @@ jobs:
                   applicationId "com.example.monitordados"
                   minSdk 23
                   targetSdk 33
-                  versionCode 13
-                  versionName "10.1"
+                  versionCode 14
+                  versionName "10.2"
               }
               buildTypes {
                   debug {
