@@ -1,4 +1,4 @@
-name: Gerar 2 APKs - Monitor e Central (v10.2 Fix Bloqueio App + GPS Dinamico)
+name: Gerar 2 APKs - Monitor e Central (v10.3 Botao Atualizar GPS Agora)
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
 
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
 
-      - name: 4. Gerar todos os arquivos completos do projeto (v10.2)
+      - name: 4. Gerar todos os arquivos completos do projeto (v10.3)
         run: |
           mkdir -p app/src/main/assets
           mkdir -p app/src/main/java/com/example/monitordados
@@ -122,7 +122,7 @@ jobs:
           sed -i 's/^          //' app/src/main/AndroidManifest.xml
 
           # ===================================================================
-          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE CSV + GPS EM TEMPO REAL)
+          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE CSV + GPS SOB DEMANDA)
           # ===================================================================
           cat << 'EOF' > app/src/main/java/com/example/monitordados/MainActivity.java
           package com.example.monitordados;
@@ -225,6 +225,7 @@ jobs:
               private static volatile float melhorPrecisaoMetros = 99999f;
               private static volatile long ultimoTempoGps = 0L;
               private static volatile long ultimoTimestampSatelite = 0L;
+              private static volatile long ultimoGpsForcadoTs = 0L;
               private static volatile String cidadeDetectadaCache = "";
               private static volatile String enderecoDetectadoCache = "";
               private static double ultimaLatGeocodificada = 0.0;
@@ -269,7 +270,6 @@ jobs:
                   return nome;
               }
 
-              // Converte CSV ("com.whatsapp,com.instagram.android") para JSONObject em memoria
               public static JSONObject csvParaJsonBloqueados(String csv) {
                   JSONObject obj = new JSONObject();
                   if (csv == null || csv.trim().isEmpty()) return obj;
@@ -283,7 +283,6 @@ jobs:
                   return obj;
               }
 
-              // Converte JSONObject de apps bloqueados para CSV seguro para o Firebase (sem pontos nas chaves)
               public static String jsonBloqueadosParaCsv(JSONObject mapa) {
                   if (mapa == null) return "";
                   List<String> lista = new ArrayList<>();
@@ -315,7 +314,6 @@ jobs:
                   float acc = (precisao > 0f) ? precisao : 25f;
 
                   if (!ehAoVivo) {
-                      // Leitura de getLastKnownLocation: so aceita se ainda nao tivermos posicao ou se o fix do satelite for realmente novo
                       if (melhorLat != 0.0 && tempoFix <= ultimoTimestampSatelite) {
                           return;
                       }
@@ -323,7 +321,6 @@ jobs:
                           return;
                       }
                   } else {
-                      // Leitura ao vivo: ignora apenas se chegou um salto muito impreciso (>200m) menos de 10s apos um fix excelente (<25m)
                       if (melhorLat != 0.0 && (agora - ultimoTempoGps) < 10000L && acc > 200f && melhorPrecisaoMetros < 25f) {
                           return;
                       }
@@ -342,12 +339,36 @@ jobs:
                       SharedPreferences.Editor ed = getPrefs(context).edit();
                       ed.putString("gps_lat_exata", String.valueOf(lat));
                       ed.putString("gps_lon_exata", String.valueOf(lon));
-                      // Se o aparelho se moveu mais de ~15 metros, invalida o tempo do Geocoder para atualizar rua/bairro/cidade na hora
                       if (deslocamentoGraus >= 0.00015) {
                           ultimoTempoGeocoder = 0L;
                       }
                       ed.apply();
                   } catch (Throwable ignored) {}
+              }
+
+              // Forca nova leitura imediata de satelite/rede e limpa caches de endereco quando solicitado pela Central
+              public static void forcarAtualizacaoGpsImediata(final Context context) {
+                  final Context appCtx = context.getApplicationContext();
+                  if (ehAppCentral(appCtx)) return;
+
+                  ultimoTimestampSatelite = 0L;
+                  ultimoTempoGeocoder = 0L;
+                  ultimaLatGeocodificada = 0.0;
+                  ultimaLonGeocodificada = 0.0;
+                  ultimoRegistroListenerMs = 0L;
+                  ultimoGpsForcadoTs = System.currentTimeMillis();
+
+                  new Handler(Looper.getMainLooper()).post(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              iniciarRastreadorGpsNativo(appCtx);
+                              if (webViewGlobal != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                                  webViewGlobal.evaluateJavascript("try { if (typeof window.forcarLeituraGpsFresca === 'function') { window.forcarLeituraGpsFresca(); } } catch(e) {}", null);
+                              }
+                          } catch (Throwable ignored) {}
+                      }
+                  });
               }
 
               public static void iniciarRastreadorGpsNativo(final Context context) {
@@ -383,7 +404,6 @@ jobs:
                               LocationManager lm = (LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
                               if (lm == null) return;
 
-                              // Compara todos os provedores pelo timestamp real para nao usar cache velho
                               String[] provedores = new String[]{
                                       LocationManager.GPS_PROVIDER,
                                       LocationManager.NETWORK_PROVIDER,
@@ -421,10 +441,9 @@ jobs:
                                       };
                                   }
 
-                                  // minDistance = 0f garante atualizacao continua mesmo em pequenos deslocamentos
                                   for (String prov : provedores) {
                                       try {
-                                          lm.requestLocationUpdates(prov, 3000L, 0f, listenerGpsAtivo, Looper.getMainLooper());
+                                          lm.requestLocationUpdates(prov, 2500L, 0f, listenerGpsAtivo, Looper.getMainLooper());
                                       } catch (Throwable ignored) {}
                                   }
                               }
@@ -485,7 +504,6 @@ jobs:
 
                   long agora = System.currentTimeMillis();
                   double distMudanca = Math.abs(lat - ultimaLatGeocodificada) + Math.abs(lon - ultimaLonGeocodificada);
-                  // Atualiza imediatamente se moveu ~15m (0.00015 graus) ou a cada 25 segundos se ainda nao tiver rua detalhada
                   if (!cidadeDetectadaCache.isEmpty() && distMudanca < 0.00015 && (agora - ultimoTempoGeocoder) < 25000L) {
                       return;
                   }
@@ -740,7 +758,7 @@ jobs:
                       conn.setReadTimeout(6000);
                       conn.setRequestMethod(metodo);
                       conn.setRequestProperty("Accept", "application/json");
-                      conn.setRequestProperty("User-Agent", "MonitorDadosFrota/10.2 (Android)");
+                      conn.setRequestProperty("User-Agent", "MonitorDadosFrota/10.3 (Android)");
                       if (jsonBody != null) {
                           conn.setDoOutput(true);
                           conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -833,11 +851,13 @@ jobs:
 
                       long ultimoCmdTs = Long.parseLong(prefs.getString("ultimoCmdTs_v9", "0"));
                       long ultimoZerarTs = Long.parseLong(prefs.getString("ultimoZerarTs_v9", "0"));
+                      long ultimoGpsCmdTs = Long.parseLong(prefs.getString("ultimoGpsCmdTs_v10", "0"));
                       double consumoBrutoAtual = obterConsumoTotalMesGBStatic(appCtx, diaCiclo);
 
                       boolean mudouFirewall = false;
                       boolean mudouConfig = false;
                       boolean gravarConfigDeVolta = false;
+                      boolean pediuRefreshGpsAgora = false;
 
                       // 1. Ler primeiro comandos diretos do Firebase (/frota/comandos/{deviceId}.json)
                       String respCmd = requisicaoHttpFirebase(FIREBASE_URL + "/frota/comandos/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
@@ -895,12 +915,16 @@ jobs:
                                   offsetZeroGB = consumoBrutoAtual;
                                   ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
                                   mudouConfig = true;
+                              } else if ("ATUALIZAR_GPS".equals(acao)) {
+                                  ultimoGpsCmdTs = tsCmd;
+                                  ed.putString("ultimoGpsCmdTs_v10", String.valueOf(ultimoGpsCmdTs));
+                                  pediuRefreshGpsAgora = true;
                               }
                               ed.apply();
                           }
                       }
 
-                      // 2. Ler configuracoes persistentes do Firebase (/frota/config/{deviceId}.json) se nao houve comando novo neste ciclo
+                      // 2. Ler configuracoes persistentes do Firebase (/frota/config/{deviceId}.json)
                       if (!gravarConfigDeVolta) {
                           String respCfg = requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json?t=" + System.currentTimeMillis(), "GET", null);
                           if (respCfg != null && !respCfg.equals("null") && respCfg.startsWith("{")) {
@@ -957,10 +981,15 @@ jobs:
                                   ed.putString("offsetZeroGB", String.valueOf(offsetZeroGB));
                                   mudouConfig = true;
                               }
+                              long gpsTsNuvem = cfg.optLong("forcarGpsTimestamp", 0);
+                              if (gpsTsNuvem > ultimoGpsCmdTs) {
+                                  ultimoGpsCmdTs = gpsTsNuvem;
+                                  ed.putString("ultimoGpsCmdTs_v10", String.valueOf(ultimoGpsCmdTs));
+                                  pediuRefreshGpsAgora = true;
+                              }
                               ed.apply();
                           }
                       } else {
-                          // Sincroniza /frota/config com o comando recem-aplicado usando CSV seguro (sem pontos em chaves JSON)
                           JSONObject cfgSync = new JSONObject();
                           cfgSync.put("nome", nomeAparelho);
                           cfgSync.put("planoGB", planoGB);
@@ -973,6 +1002,12 @@ jobs:
 
                       if (mudouFirewall) {
                           aplicarFirewallNativo(appCtx, firewallGeral, appsBloqJson);
+                      }
+
+                      // Se a Central pediu atualizacao de GPS agora, dispara os sensores e aguarda 1.5s para capturar o fix novo
+                      if (pediuRefreshGpsAgora) {
+                          forcarAtualizacaoGpsImediata(appCtx);
+                          try { Thread.sleep(1500); } catch (Throwable ignored) {}
                       }
 
                       // 3. Medir latencia rapida
@@ -999,7 +1034,7 @@ jobs:
                           }
                       } catch (Throwable ignored) {}
 
-                      // 4. Verifica se ha leitura mais recente nos provedores (comparando timestamp real do fix!)
+                      // 4. Verifica se ha leitura mais recente nos provedores
                       try {
                           if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
                                   appCtx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
@@ -1021,7 +1056,7 @@ jobs:
                                       } catch (Throwable ignored) {}
                                   }
                                   if (melhorCand != null) {
-                                      registrarCoordenadaInterna(appCtx, melhorCand.getLatitude(), melhorCand.getLongitude(), melhorCand.getAccuracy(), melhorCand.getTime(), false);
+                                      registrarCoordenadaInterna(appCtx, melhorCand.getLatitude(), melhorCand.getLongitude(), melhorCand.getAccuracy(), melhorCand.getTime(), pediuRefreshGpsAgora);
                                   }
                               }
                           }
@@ -1030,6 +1065,9 @@ jobs:
                       double latExata = melhorLat;
                       double lonExata = melhorLon;
 
+                      if (pediuRefreshGpsAgora) {
+                          ultimoTempoGeocoder = 0L;
+                      }
                       if (latExata != 0.0 || lonExata != 0.0) {
                           atualizarCidadeEEnderecoPorCoordenada(appCtx, latExata, lonExata);
                       }
@@ -1063,6 +1101,7 @@ jobs:
                       pacote.put("cidade", cidadeReal);
                       pacote.put("endereco", enderecoReal);
                       pacote.put("precisaoMetros", Math.round(melhorPrecisaoMetros));
+                      pacote.put("ultimoGpsRefreshTs", ultimoGpsForcadoTs > 0 ? ultimoGpsForcadoTs : ultimoTempoGps);
                       pacote.put("operadora", operadora);
                       pacote.put("lat", lat7);
                       pacote.put("lon", lon7);
@@ -2079,7 +2118,7 @@ jobs:
                 }
               }
 
-              function forcarLeituraGpsFresca() {
+              window.forcarLeituraGpsFresca = function() {
                 if (!navigator.geolocation) return;
                 try {
                   navigator.geolocation.getCurrentPosition(enviarPosicaoParaNativo, function() {}, {
@@ -2088,12 +2127,12 @@ jobs:
                     timeout: 5000
                   });
                 } catch (e) {}
-              }
+              };
 
               function iniciarGpsAltaPrecisaoWebView() {
                 if (!navigator.geolocation) return;
                 try {
-                  forcarLeituraGpsFresca();
+                  window.forcarLeituraGpsFresca();
                   navigator.geolocation.watchPosition(enviarPosicaoParaNativo, function() {}, {
                     enableHighAccuracy: true,
                     maximumAge: 0,
@@ -2157,7 +2196,7 @@ jobs:
 
               window.pulsoNativoSegundoPlano = function() {
                 try {
-                  forcarLeituraGpsFresca();
+                  window.forcarLeituraGpsFresca();
                   window.recarregarMemoriaNativa();
                   atualizarPainelLocal();
                 } catch (e) {}
@@ -2176,7 +2215,7 @@ jobs:
           EOF
 
           # ===================================================================
-          # 4. CENTRAL.HTML COMPLETO (APP 2 - BLOQUEIO INDIVIDUAL + ENDERECO REAL)
+          # 4. CENTRAL.HTML COMPLETO (APP 2 - BOTAO ATUALIZAR GPS AGORA + BLOQUEIO APP)
           # ===================================================================
           cat << 'EOF' > app/src/main/assets/central.html
           <!DOCTYPE html>
@@ -2258,6 +2297,7 @@ jobs:
               .rename-row { display: flex; gap: 6px; margin-top: 6px; }
               .rename-row input { flex: 1; margin-top: 0; }
               .rename-row button { width: auto; padding: 0 14px; margin-top: 0; white-space: nowrap; }
+              .gps-status-bar { font-size: 0.76rem; color: var(--primary); font-weight: 700; margin-bottom: 8px; min-height: 18px; }
             </style>
           </head>
           <body>
@@ -2326,12 +2366,19 @@ jobs:
                   </div>
                 </div>
 
-                <div class="grid-2" style="margin-bottom: 10px;">
+                <div class="grid-2" style="margin-bottom: 8px;">
                   <div class="metric-box"><div class="metric-label">Consumo / Plano</div><div class="metric-val" id="modalConsumoPlano" style="font-size:0.9rem;">--</div></div>
                   <div class="metric-box"><div class="metric-label">Rede Ativa / Ping</div><div class="metric-val" id="modalRedePing" style="font-size:0.88rem;">--</div></div>
                   <div class="metric-box"><div class="metric-label">Endereco / Bairro / Cidade</div><div class="metric-val" id="modalCidadeOp" style="font-size:0.82rem; line-height:1.3;">--</div></div>
                   <div class="metric-box"><div class="metric-label">Coordenadas GPS Exatas</div><div class="metric-val" id="modalCoordsGps" style="font-size:0.8rem;">--</div></div>
                 </div>
+
+                <!-- Botao Atualizar GPS Agora + Barra de Status em Tempo Real -->
+                <div class="grid-2" style="margin-bottom: 6px;">
+                  <button type="button" id="btnAtualizarGpsModal" class="btn-warn" style="margin-top:0;" onclick="solicitarAtualizacaoGpsRemoto()">📍 Atualizar GPS Agora</button>
+                  <button type="button" id="btnAbrirMapaModal" class="btn-sec" style="margin-top:0;">🗺️ Abrir Ponto Exato no Mapa</button>
+                </div>
+                <div id="statusGpsRemoto" class="gps-status-bar"></div>
 
                 <div class="config-remota-box">
                   <div class="card-title" style="margin-bottom: 6px;">
@@ -2360,9 +2407,8 @@ jobs:
                   </div>
                 </div>
 
-                <div class="grid-2" style="margin-bottom: 12px;">
-                  <button id="btnAbrirMapaModal" class="btn-sec" style="margin-top:0;">🗺️ Abrir Ponto Exato no Mapa</button>
-                  <button id="btnToggleDadosModal" class="btn-danger" style="margin-top:0;">🛡️ Bloquear Todos</button>
+                <div style="margin-bottom: 12px;">
+                  <button id="btnToggleDadosModal" class="btn-danger" style="margin-top:0;">🛡️ Bloquear Todos os Aplicativos</button>
                 </div>
 
                 <div class="card-title">
@@ -2396,6 +2442,7 @@ jobs:
               var nomesPersonalizados = {};
               var aparelhosExcluidos = {};
               var bloqueioSyncLocalAte = {};
+              var pedidosGpsPendentes = {};
               var firebaseConectado = false;
 
               try { frotaAparelhos = JSON.parse(lerDado('frotaAparelhos_v10', '{}')) || {}; } catch (e) { frotaAparelhos = {}; }
@@ -2408,7 +2455,6 @@ jobs:
               var filtroFrotaAtual = 'todos';
               var termoBuscaFrota = '';
 
-              // Converte CSV ("com.whatsapp,com.instagram.android") em mapa JS
               function csvParaMapa(csv) {
                 var mapa = {};
                 if (!csv || typeof csv !== 'string') return mapa;
@@ -2420,7 +2466,6 @@ jobs:
                 return mapa;
               }
 
-              // Converte mapa JS em CSV seguro para o Firebase (evita erro HTTP 400 de ponto em chave JSON)
               function mapaParaCsv(mapa) {
                 if (!mapa || typeof mapa !== 'object') return '';
                 var ch = Object.keys(mapa).filter(function(k) { return Boolean(mapa[k]); });
@@ -2446,7 +2491,9 @@ jobs:
 
               function gravarComandoEConfigFirebase(deviceId, comandoObj, dadosAparelho, configPatch) {
                 try {
-                  bloqueioSyncLocalAte[deviceId] = Date.now() + 5000;
+                  if (dadosAparelho) {
+                    bloqueioSyncLocalAte[deviceId] = Date.now() + 5000;
+                  }
                   if (comandoObj) {
                     fetch(FIREBASE_URL + '/frota/comandos/' + encodeURIComponent(deviceId) + '.json', {
                       method: 'PUT',
@@ -2471,6 +2518,44 @@ jobs:
                     }).catch(function() {});
                   }
                 } catch (e) {}
+              }
+
+              function solicitarAtualizacaoGpsRemoto() {
+                if (!aparelhoRemotoSelecionado) return;
+                var d = frotaAparelhos[aparelhoRemotoSelecionado];
+                if (!d) return;
+
+                var id = d.deviceId;
+                var agoraTs = Date.now();
+                pedidosGpsPendentes[id] = {
+                  pedidoEm: agoraTs,
+                  refreshAntigo: Number(d.ultimoGpsRefreshTs || 0),
+                  timestampAntigo: Number(d.timestamp || 0)
+                };
+
+                var btnGps = document.getElementById('btnAtualizarGpsModal');
+                var statusGps = document.getElementById('statusGpsRemoto');
+                if (btnGps) btnGps.textContent = '⏳ Atualizando Satélite...';
+                if (statusGps) {
+                  statusGps.style.color = 'var(--warning)';
+                  statusGps.textContent = '📡 Solicitando leitura de satélite e endereço ao aparelho...';
+                }
+
+                var comando = {
+                  deviceId: id,
+                  acao: 'ATUALIZAR_GPS',
+                  timestamp: agoraTs
+                };
+
+                // Envia comando e configPatch sem bloquear a recepcao da resposta do aparelho
+                gravarComandoEConfigFirebase(id, comando, null, {
+                  forcarGpsTimestamp: agoraTs,
+                  updatedAt: agoraTs
+                });
+
+                setTimeout(carregarFrotaDoFirebase, 1800);
+                setTimeout(carregarFrotaDoFirebase, 3800);
+                setTimeout(carregarFrotaDoFirebase, 6500);
               }
 
               function excluirAparelhoDoFirebase(id) {
@@ -2649,6 +2734,29 @@ jobs:
                 sincronizarEstadoAppsNoObjeto(payload);
                 frotaAparelhos[id] = payload;
                 salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
+
+                // Verifica se havia solicitacao de atualizacao de GPS pendente para este aparelho
+                if (pedidosGpsPendentes[id]) {
+                  var pend = pedidosGpsPendentes[id];
+                  var novoRefresh = Number(payload.ultimoGpsRefreshTs || 0);
+                  var novoTs = Number(payload.timestamp || 0);
+                  if (novoRefresh > pend.refreshAntigo || (novoTs > pend.timestampAntigo && (Date.now() - pend.pedidoEm) >= 2200)) {
+                    delete pedidosGpsPendentes[id];
+                    if (aparelhoRemotoSelecionado === id) {
+                      var btnGps = document.getElementById('btnAtualizarGpsModal');
+                      var statusGps = document.getElementById('statusGpsRemoto');
+                      if (btnGps) btnGps.textContent = '📍 Atualizar GPS Agora';
+                      if (statusGps) {
+                        statusGps.style.color = 'var(--success)';
+                        statusGps.textContent = '✅ GPS e endereço atualizados com sucesso!';
+                        setTimeout(function() {
+                          if (statusGps.textContent.indexOf('✅') !== -1) statusGps.textContent = '';
+                        }, 4000);
+                      }
+                    }
+                  }
+                }
+
                 if (!silencioso) {
                   renderizarFrota();
                   atualizarBadgeStatusCentral();
@@ -2795,7 +2903,6 @@ jobs:
                 var d = frotaAparelhos[id];
                 if (!d || !pacoteApp) return;
 
-                // Se todos os apps estavam bloqueados no geral e o usuario clicou para liberar 1 app, desliga o bloqueio geral primeiro
                 if (Boolean(d.dadosDesligados)) {
                   d.dadosDesligados = false;
                   d.rede = '4G/5G Movel';
@@ -2954,6 +3061,10 @@ jobs:
                 if (!dados) return;
                 aparelhoRemotoSelecionado = id;
                 filtroModalRemoto = 'todos';
+                var statusGps = document.getElementById('statusGpsRemoto');
+                var btnGps = document.getElementById('btnAtualizarGpsModal');
+                if (statusGps) statusGps.textContent = '';
+                if (btnGps) btnGps.textContent = '📍 Atualizar GPS Agora';
                 preencherModalRemoto(dados, false);
                 document.getElementById('modalAparelhoRemoto').style.display = 'block';
               }
@@ -2983,7 +3094,7 @@ jobs:
                 };
 
                 var btnToggle = document.getElementById('btnToggleDadosModal');
-                btnToggle.textContent = d.dadosDesligados ? '🟢 Liberar Todos' : '🛡️ Bloquear Todos';
+                btnToggle.textContent = d.dadosDesligados ? '🟢 Liberar Todos os Aplicativos' : '🛡️ Bloquear Todos os Aplicativos';
                 btnToggle.className = d.dadosDesligados ? 'btn-success' : 'btn-danger';
                 btnToggle.onclick = function() { alternarFirewallGeralAparelho(d.deviceId); };
                 filtrarAppsRemoto(filtroModalRemoto);
@@ -3090,8 +3201,8 @@ jobs:
                   applicationId "com.example.monitordados"
                   minSdk 23
                   targetSdk 33
-                  versionCode 14
-                  versionName "10.2"
+                  versionCode 15
+                  versionName "10.3"
               }
               buildTypes {
                   debug {
