@@ -1,4 +1,4 @@
-name: Gerar 2 APKs - Monitor e Central (v10.3 Botao Atualizar GPS Agora)
+name: Gerar 2 APKs - Monitor e Central (v10.4 GPS no Boot + Excecoes Bloqueio + Sincronizado 24h)
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
 
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
 
-      - name: 4. Gerar todos os arquivos completos do projeto (v10.3)
+      - name: 4. Gerar todos os arquivos completos do projeto (v10.4)
         run: |
           mkdir -p app/src/main/assets
           mkdir -p app/src/main/java/com/example/monitordados
@@ -64,6 +64,7 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
               <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -94,11 +95,13 @@ jobs:
                       android:name=".MainActivity$MonitorSempreAtivoService"
                       android:enabled="true"
                       android:exported="false"
+                      android:directBootAware="true"
                       android:foregroundServiceType="location" />
 
                   <service
                       android:name=".MainActivity$FirewallVpnService"
                       android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:directBootAware="true"
                       android:exported="true">
                       <intent-filter>
                           <action android:name="android.net.VpnService" />
@@ -108,11 +111,15 @@ jobs:
                   <receiver
                       android:name=".MainActivity$BootReceiver"
                       android:enabled="true"
+                      android:directBootAware="true"
                       android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                           <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                          <action android:name="android.intent.action.USER_PRESENT" />
                           <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                          <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
                       </intent-filter>
                   </receiver>
 
@@ -122,7 +129,7 @@ jobs:
           sed -i 's/^          //' app/src/main/AndroidManifest.xml
 
           # ===================================================================
-          # 2. MAINACTIVITY.JAVA COMPLETO (FIREBASE CSV + GPS SOB DEMANDA)
+          # 2. MAINACTIVITY.JAVA COMPLETO (GPS NO BOOT + EXCECOES VPN)
           # ===================================================================
           cat << 'EOF' > app/src/main/java/com/example/monitordados/MainActivity.java
           package com.example.monitordados;
@@ -146,6 +153,7 @@ jobs:
           import android.content.pm.ApplicationInfo;
           import android.content.pm.PackageInfo;
           import android.content.pm.PackageManager;
+          import android.content.pm.ServiceInfo;
           import android.location.Address;
           import android.location.Geocoder;
           import android.location.Location;
@@ -205,6 +213,7 @@ jobs:
 
               private static final int REQ_PERMISSOES = 101;
               private static final int REQ_VPN = 102;
+              private static final int REQ_BG_LOCATION = 103;
               private static final String PREFS_NAME = "MonitorFrotaPrefs";
               private static final String FIREBASE_URL = "https://painel-2d29e-default-rtdb.firebaseio.com";
 
@@ -270,7 +279,7 @@ jobs:
                   return nome;
               }
 
-              public static JSONObject csvParaJsonBloqueados(String csv) {
+              public static JSONObject csvParaJsonMapa(String csv) {
                   JSONObject obj = new JSONObject();
                   if (csv == null || csv.trim().isEmpty()) return obj;
                   String[] partes = csv.split(",");
@@ -283,7 +292,7 @@ jobs:
                   return obj;
               }
 
-              public static String jsonBloqueadosParaCsv(JSONObject mapa) {
+              public static String jsonMapaParaCsv(JSONObject mapa) {
                   if (mapa == null) return "";
                   List<String> lista = new ArrayList<>();
                   Iterator<String> keys = mapa.keys();
@@ -302,6 +311,17 @@ jobs:
                   return sb.toString();
               }
 
+              public static boolean temPermissaoGpsSegundoPlanoStatic(Context context) {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+                  boolean fine = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+                  boolean coarse = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+                  if (!fine && !coarse) return false;
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      return context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
+                  }
+                  return true;
+              }
+
               public static synchronized void registrarCoordenadaPrecisa(Context context, double lat, double lon, float precisao) {
                   registrarCoordenadaInterna(context, lat, lon, precisao, System.currentTimeMillis(), true);
               }
@@ -317,7 +337,8 @@ jobs:
                       if (melhorLat != 0.0 && tempoFix <= ultimoTimestampSatelite) {
                           return;
                       }
-                      if (melhorLat != 0.0 && (agora - tempoFix) > 120000L) {
+                      // Se o servico acabou de iniciar no boot (ultimoTempoGps == 0), aceita o fix mais recente dos provedores
+                      if (melhorLat != 0.0 && ultimoTempoGps > 0L && (agora - tempoFix) > 120000L) {
                           return;
                       }
                   } else {
@@ -346,7 +367,6 @@ jobs:
                   } catch (Throwable ignored) {}
               }
 
-              // Forca nova leitura imediata de satelite/rede e limpa caches de endereco quando solicitado pela Central
               public static void forcarAtualizacaoGpsImediata(final Context context) {
                   final Context appCtx = context.getApplicationContext();
                   if (ehAppCentral(appCtx)) return;
@@ -425,7 +445,8 @@ jobs:
                               }
 
                               long agora = System.currentTimeMillis();
-                              if (listenerGpsAtivo == null || (agora - ultimoRegistroListenerMs) > 25000L) {
+                              // Se passou mais de 20s sem registrar listener ou se o GPS nao atualizou nos ultimos 20s (ex: pos-boot), renova o registro dos sensores
+                              if (listenerGpsAtivo == null || (agora - ultimoRegistroListenerMs) > 20000L || (agora - ultimoTempoGps) > 20000L) {
                                   ultimoRegistroListenerMs = agora;
                                   if (listenerGpsAtivo == null) {
                                       listenerGpsAtivo = new LocationListener() {
@@ -443,7 +464,7 @@ jobs:
 
                                   for (String prov : provedores) {
                                       try {
-                                          lm.requestLocationUpdates(prov, 2500L, 0f, listenerGpsAtivo, Looper.getMainLooper());
+                                          lm.requestLocationUpdates(prov, 2000L, 0f, listenerGpsAtivo, Looper.getMainLooper());
                                       } catch (Throwable ignored) {}
                                   }
                               }
@@ -758,7 +779,7 @@ jobs:
                       conn.setReadTimeout(6000);
                       conn.setRequestMethod(metodo);
                       conn.setRequestProperty("Accept", "application/json");
-                      conn.setRequestProperty("User-Agent", "MonitorDadosFrota/10.3 (Android)");
+                      conn.setRequestProperty("User-Agent", "MonitorDadosFrota/10.4 (Android)");
                       if (jsonBody != null) {
                           conn.setDoOutput(true);
                           conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -788,7 +809,20 @@ jobs:
                   }
               }
 
-              public static void aplicarFirewallNativo(Context context, boolean bloquearGeral, JSONObject mapaAppsBloq) {
+              public static void restaurarFirewallSalvo(Context context) {
+                  try {
+                      if (ehAppCentral(context)) return;
+                      SharedPreferences prefs = getPrefs(context);
+                      boolean fwGeral = "true".equals(prefs.getString("firewallGeral_v7", "false"));
+                      JSONObject appsBloq = new JSONObject(prefs.getString("appsBloqueados_v7", "{}"));
+                      JSONObject appsLib = new JSONObject(prefs.getString("appsLiberados_v10", "{}"));
+                      if (fwGeral || appsBloq.length() > 0) {
+                          aplicarFirewallNativo(context.getApplicationContext(), fwGeral, appsBloq, appsLib);
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              public static void aplicarFirewallNativo(Context context, boolean bloquearGeral, JSONObject mapaAppsBloq, JSONObject mapaAppsLib) {
                   try {
                       FirewallVpnService.bloqueioGeralAtivo = bloquearGeral;
                       synchronized (FirewallVpnService.listaAppsBloqueados) {
@@ -799,6 +833,18 @@ jobs:
                                   String pkg = keys.next();
                                   if (pkg != null && !pkg.isEmpty() && mapaAppsBloq.optBoolean(pkg, false)) {
                                       FirewallVpnService.listaAppsBloqueados.add(pkg);
+                                  }
+                              }
+                          }
+                      }
+                      synchronized (FirewallVpnService.listaAppsLiberadosExcecao) {
+                          FirewallVpnService.listaAppsLiberadosExcecao.clear();
+                          if (mapaAppsLib != null) {
+                              Iterator<String> keys = mapaAppsLib.keys();
+                              while (keys.hasNext()) {
+                                  String pkg = keys.next();
+                                  if (pkg != null && !pkg.isEmpty() && mapaAppsLib.optBoolean(pkg, false)) {
+                                      FirewallVpnService.listaAppsLiberadosExcecao.add(pkg);
                                   }
                               }
                           }
@@ -845,9 +891,14 @@ jobs:
                       int diaCiclo = Integer.parseInt(prefs.getString("diaCiclo", "1"));
                       double offsetZeroGB = Double.parseDouble(prefs.getString("offsetZeroGB", "0"));
                       boolean firewallGeral = "true".equals(prefs.getString("firewallGeral_v7", "false"));
-                      String appsBloqStr = prefs.getString("appsBloqueados_v7", "{}");
+
                       JSONObject appsBloqJson;
-                      try { appsBloqJson = new JSONObject(appsBloqStr); } catch (Throwable e) { appsBloqJson = new JSONObject(); }
+                      try { appsBloqJson = new JSONObject(prefs.getString("appsBloqueados_v7", "{}")); }
+                      catch (Throwable e) { appsBloqJson = new JSONObject(); }
+
+                      JSONObject appsLibJson;
+                      try { appsLibJson = new JSONObject(prefs.getString("appsLiberados_v10", "{}")); }
+                      catch (Throwable e) { appsLibJson = new JSONObject(); }
 
                       long ultimoCmdTs = Long.parseLong(prefs.getString("ultimoCmdTs_v9", "0"));
                       long ultimoZerarTs = Long.parseLong(prefs.getString("ultimoZerarTs_v9", "0"));
@@ -873,22 +924,47 @@ jobs:
                               if ("FIREWALL_GERAL".equals(acao) || "DESLIGAR_DADOS".equals(acao) || "RELIGAR_DADOS".equals(acao)) {
                                   firewallGeral = "DESLIGAR_DADOS".equals(acao) || cmd.optBoolean("bloquear", false);
                                   ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
+                                  if (cmd.has("appsLiberadosCsv")) {
+                                      appsLibJson = csvParaJsonMapa(cmd.optString("appsLiberadosCsv", ""));
+                                  } else {
+                                      appsLibJson = new JSONObject();
+                                  }
+                                  if (!firewallGeral && cmd.has("appsBloqueadosCsv")) {
+                                      appsBloqJson = csvParaJsonMapa(cmd.optString("appsBloqueadosCsv", ""));
+                                  } else if (!firewallGeral) {
+                                      appsBloqJson = new JSONObject();
+                                  }
+                                  ed.putString("appsLiberados_v10", appsLibJson.toString());
+                                  ed.putString("appsBloqueados_v7", appsBloqJson.toString());
                                   mudouFirewall = true;
                                   gravarConfigDeVolta = true;
                               } else if ("FIREWALL_APP".equals(acao)) {
+                                  if (cmd.has("dadosDesligados")) {
+                                      firewallGeral = cmd.optBoolean("dadosDesligados", firewallGeral);
+                                      ed.putString("firewallGeral_v7", firewallGeral ? "true" : "false");
+                                  }
                                   if (cmd.has("appsBloqueadosCsv")) {
-                                      appsBloqJson = csvParaJsonBloqueados(cmd.optString("appsBloqueadosCsv", ""));
-                                  } else {
+                                      appsBloqJson = csvParaJsonMapa(cmd.optString("appsBloqueadosCsv", ""));
+                                      ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                  }
+                                  if (cmd.has("appsLiberadosCsv")) {
+                                      appsLibJson = csvParaJsonMapa(cmd.optString("appsLiberadosCsv", ""));
+                                      ed.putString("appsLiberados_v10", appsLibJson.toString());
+                                  } else if (!cmd.has("appsBloqueadosCsv")) {
                                       String pct = cmd.optString("pacote", "").trim();
+                                      boolean bloq = cmd.optBoolean("bloquear", false);
                                       if (!pct.isEmpty()) {
-                                          if (cmd.optBoolean("bloquear", false)) {
-                                              appsBloqJson.put(pct, true);
+                                          if (firewallGeral) {
+                                              if (bloq) appsLibJson.remove(pct);
+                                              else appsLibJson.put(pct, true);
+                                              ed.putString("appsLiberados_v10", appsLibJson.toString());
                                           } else {
-                                              appsBloqJson.remove(pct);
+                                              if (bloq) appsBloqJson.put(pct, true);
+                                              else appsBloqJson.remove(pct);
+                                              ed.putString("appsBloqueados_v7", appsBloqJson.toString());
                                           }
                                       }
                                   }
-                                  ed.putString("appsBloqueados_v7", appsBloqJson.toString());
                                   mudouFirewall = true;
                                   gravarConfigDeVolta = true;
                               } else if ("CONFIG_PLANO".equals(acao)) {
@@ -966,10 +1042,19 @@ jobs:
                               }
                               if (cfg.has("appsBloqueadosCsv")) {
                                   String csvNuvem = cfg.optString("appsBloqueadosCsv", "");
-                                  String csvLocal = jsonBloqueadosParaCsv(appsBloqJson);
+                                  String csvLocal = jsonMapaParaCsv(appsBloqJson);
                                   if (!csvNuvem.equals(csvLocal)) {
-                                      appsBloqJson = csvParaJsonBloqueados(csvNuvem);
+                                      appsBloqJson = csvParaJsonMapa(csvNuvem);
                                       ed.putString("appsBloqueados_v7", appsBloqJson.toString());
+                                      mudouFirewall = true;
+                                  }
+                              }
+                              if (cfg.has("appsLiberadosCsv")) {
+                                  String csvLibNuvem = cfg.optString("appsLiberadosCsv", "");
+                                  String csvLibLocal = jsonMapaParaCsv(appsLibJson);
+                                  if (!csvLibNuvem.equals(csvLibLocal)) {
+                                      appsLibJson = csvParaJsonMapa(csvLibNuvem);
+                                      ed.putString("appsLiberados_v10", appsLibJson.toString());
                                       mudouFirewall = true;
                                   }
                               }
@@ -995,16 +1080,16 @@ jobs:
                           cfgSync.put("planoGB", planoGB);
                           cfgSync.put("diaCiclo", diaCiclo);
                           cfgSync.put("dadosDesligados", firewallGeral);
-                          cfgSync.put("appsBloqueadosCsv", jsonBloqueadosParaCsv(appsBloqJson));
+                          cfgSync.put("appsBloqueadosCsv", jsonMapaParaCsv(appsBloqJson));
+                          cfgSync.put("appsLiberadosCsv", jsonMapaParaCsv(appsLibJson));
                           cfgSync.put("updatedAt", System.currentTimeMillis());
                           requisicaoHttpFirebase(FIREBASE_URL + "/frota/config/" + Uri.encode(deviceId) + ".json", "PUT", cfgSync.toString());
                       }
 
                       if (mudouFirewall) {
-                          aplicarFirewallNativo(appCtx, firewallGeral, appsBloqJson);
+                          aplicarFirewallNativo(appCtx, firewallGeral, appsBloqJson, appsLibJson);
                       }
 
-                      // Se a Central pediu atualizacao de GPS agora, dispara os sensores e aguarda 1.5s para capturar o fix novo
                       if (pediuRefreshGpsAgora) {
                           forcarAtualizacaoGpsImediata(appCtx);
                           try { Thread.sleep(1500); } catch (Throwable ignored) {}
@@ -1024,7 +1109,7 @@ jobs:
 
                       double consumoLiquido = Math.max(0.0, consumoBrutoAtual - offsetZeroGB);
                       String redeAtiva = obterTipoRedeStatic(appCtx);
-                      double velMbps = firewallGeral ? 0.0 : obterVelocidadeMbpsStatic();
+                      double velMbps = firewallGeral && appsLibJson.length() == 0 ? 0.0 : obterVelocidadeMbpsStatic();
 
                       String operadora = "Rede Movel";
                       try {
@@ -1044,6 +1129,7 @@ jobs:
                                   String[] provs = new String[]{
                                           LocationManager.GPS_PROVIDER,
                                           LocationManager.NETWORK_PROVIDER,
+                                          LocationManager.PASSIVE_PROVIDER,
                                           "fused"
                                   };
                                   Location melhorCand = null;
@@ -1075,7 +1161,7 @@ jobs:
                       String cidadeReal = !cidadeDetectadaCache.isEmpty() ? cidadeDetectadaCache : "Localizando GPS...";
                       String enderecoReal = !enderecoDetectadoCache.isEmpty() ? enderecoDetectadoCache : cidadeReal;
 
-                      JSONArray todosApps = obterAppsInstaladosArrayStatic(appCtx, diaCiclo, firewallGeral, appsBloqJson);
+                      JSONArray todosApps = obterAppsInstaladosArrayStatic(appCtx, diaCiclo, firewallGeral, appsBloqJson, appsLibJson);
                       JSONArray topApps = new JSONArray();
                       int limiteApps = Math.min(todosApps.length(), 25);
                       for (int i = 0; i < limiteApps; i++) {
@@ -1084,7 +1170,8 @@ jobs:
 
                       double lat7 = Math.round(latExata * 10000000.0) / 10000000.0;
                       double lon7 = Math.round(lonExata * 10000000.0) / 10000000.0;
-                      String csvBloqAtual = jsonBloqueadosParaCsv(appsBloqJson);
+                      String csvBloqAtual = jsonMapaParaCsv(appsBloqJson);
+                      String csvLibAtual = jsonMapaParaCsv(appsLibJson);
 
                       JSONObject pacote = new JSONObject();
                       pacote.put("deviceId", deviceId);
@@ -1096,8 +1183,9 @@ jobs:
                       pacote.put("rede", firewallGeral ? "🛡️ Apps Bloqueados" : redeAtiva);
                       pacote.put("dadosDesligados", firewallGeral);
                       pacote.put("appsBloqueadosCsv", csvBloqAtual);
+                      pacote.put("appsLiberadosCsv", csvLibAtual);
                       pacote.put("velocidade", Math.round(velMbps * 10.0) / 10.0);
-                      pacote.put("latencia", firewallGeral ? 0 : ultimaLatenciaMs);
+                      pacote.put("latencia", (firewallGeral && appsLibJson.length() == 0) ? 0 : ultimaLatenciaMs);
                       pacote.put("cidade", cidadeReal);
                       pacote.put("endereco", enderecoReal);
                       pacote.put("precisaoMetros", Math.round(melhorPrecisaoMetros));
@@ -1155,6 +1243,7 @@ jobs:
                   iniciarServico24h(this);
                   solicitarPermissoesIniciais();
                   iniciarRastreadorGpsNativo(this);
+                  restaurarFirewallSalvo(this);
               }
 
               @Override
@@ -1223,6 +1312,10 @@ jobs:
                           }
                           if (!permissoes.isEmpty()) {
                               requestPermissions(permissoes.toArray(new String[0]), REQ_PERMISSOES);
+                          } else if (Build.VERSION.SDK_INT >= 29 && !ehAppCentral(this)) {
+                              if (checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                                  requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQ_BG_LOCATION);
+                              }
                           }
 
                           PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -1238,6 +1331,14 @@ jobs:
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == REQ_PERMISSOES && Build.VERSION.SDK_INT >= 29 && !ehAppCentral(this)) {
+                      try {
+                          if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED &&
+                                  checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQ_BG_LOCATION);
+                          }
+                      } catch (Throwable ignored) {}
+                  }
                   ultimoRegistroListenerMs = 0L;
                   iniciarRastreadorGpsNativo(this);
                   acionarPulsoWebView(this);
@@ -1335,7 +1436,7 @@ jobs:
                   return Math.round(ultimaVelocidadeMbps * 100.0) / 100.0;
               }
 
-              public static JSONArray obterAppsInstaladosArrayStatic(Context context, int diaRenovacao, boolean bloqGeral, JSONObject mapaBloq) {
+              public static JSONArray obterAppsInstaladosArrayStatic(Context context, int diaRenovacao, boolean bloqGeral, JSONObject mapaBloq, JSONObject mapaLib) {
                   JSONArray listaApps = new JSONArray();
                   try {
                       PackageManager pm = context.getPackageManager();
@@ -1364,8 +1465,10 @@ jobs:
                               }
                           }
 
+                          boolean libExcecao = mapaLib != null && mapaLib.optBoolean(pkg.packageName, false);
                           boolean blqIndiv = mapaBloq != null && mapaBloq.optBoolean(pkg.packageName, false);
-                          boolean estaBloq = bloqGeral || blqIndiv;
+                          boolean estaBloq = bloqGeral ? !libExcecao : blqIndiv;
+
                           double totalMB = totalBytes / (1024.0 * 1024.0);
                           JSONObject obj = new JSONObject();
                           obj.put("nome", nomeApp);
@@ -1377,6 +1480,7 @@ jobs:
                           obj.put("geoAtiva", solicitaGeo);
                           obj.put("bloqueado", estaBloq);
                           obj.put("bloqueadoIndividual", blqIndiv);
+                          obj.put("liberadoExcecao", libExcecao);
                           tempObjs.add(obj);
                       }
 
@@ -1396,8 +1500,11 @@ jobs:
               public static class BootReceiver extends BroadcastReceiver {
                   @Override
                   public void onReceive(Context context, Intent intent) {
-                      iniciarServico24h(context);
-                      acionarPulsoWebView(context);
+                      Context appCtx = context.getApplicationContext();
+                      iniciarServico24h(appCtx);
+                      restaurarFirewallSalvo(appCtx);
+                      forcarAtualizacaoGpsImediata(appCtx);
+                      acionarPulsoWebView(appCtx);
                   }
               }
 
@@ -1413,7 +1520,8 @@ jobs:
                       super.onCreate();
                       iniciarNotificacaoDiscreta();
                       ativarLocks24h();
-                      iniciarRastreadorGpsNativo(getApplicationContext());
+                      restaurarFirewallSalvo(getApplicationContext());
+                      forcarAtualizacaoGpsImediata(getApplicationContext());
                       garantirMotorWebAtivo(getApplicationContext());
                       iniciarLoopNativoSegundoPlano();
                   }
@@ -1422,6 +1530,7 @@ jobs:
                   public int onStartCommand(Intent intent, int flags, int startId) {
                       iniciarNotificacaoDiscreta();
                       ativarLocks24h();
+                      restaurarFirewallSalvo(getApplicationContext());
                       iniciarRastreadorGpsNativo(getApplicationContext());
                       garantirMotorWebAtivo(getApplicationContext());
                       iniciarLoopNativoSegundoPlano();
@@ -1446,7 +1555,7 @@ jobs:
                                   }
                               }
                           };
-                          handlerPulso.postDelayed(runnablePulso, 2000);
+                          handlerPulso.postDelayed(runnablePulso, 1500);
                       }
                   }
 
@@ -1484,13 +1593,21 @@ jobs:
 
                           Notification notif = builder
                                   .setContentTitle("Sistema de Dados Ativo")
-                                  .setContentText("Sincronizado via Firebase 24h")
+                                  .setContentText("Sincronizado 24h")
                                   .setSmallIcon(android.R.drawable.ic_dialog_info)
                                   .setContentIntent(pi)
                                   .setOngoing(true)
                                   .build();
 
-                          startForeground(1001, notif);
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                              try {
+                                  startForeground(1001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                              } catch (Throwable e) {
+                                  startForeground(1001, notif);
+                              }
+                          } else {
+                              startForeground(1001, notif);
+                          }
                       } catch (Throwable ignored) {}
                   }
 
@@ -1544,6 +1661,7 @@ jobs:
                   private static ParcelFileDescriptor vpnInterface = null;
                   public static volatile boolean bloqueioGeralAtivo = false;
                   public static final List<String> listaAppsBloqueados = new ArrayList<>();
+                  public static final List<String> listaAppsLiberadosExcecao = new ArrayList<>();
 
                   @Override
                   public int onStartCommand(Intent intent, int flags, int startId) {
@@ -1559,8 +1677,12 @@ jobs:
                   private synchronized void aplicarRegrasVpn() {
                       fecharTunel();
                       List<String> copiaBloq;
+                      List<String> copiaLib;
                       synchronized (listaAppsBloqueados) {
                           copiaBloq = new ArrayList<>(listaAppsBloqueados);
+                      }
+                      synchronized (listaAppsLiberadosExcecao) {
+                          copiaLib = new ArrayList<>(listaAppsLiberadosExcecao);
                       }
 
                       if (!bloqueioGeralAtivo && copiaBloq.isEmpty()) {
@@ -1581,8 +1703,15 @@ jobs:
                           } catch (Throwable ignored) {}
 
                           if (bloqueioGeralAtivo) {
+                              // Bloqueia TODOS os aplicativos do celular, EXCETO o Monitor e os apps que foram liberados na Central!
                               try { builder.addDisallowedApplication(getPackageName()); } catch (Throwable ignored) {}
+                              for (String pkgLib : copiaLib) {
+                                  if (pkgLib != null && !pkgLib.trim().isEmpty()) {
+                                      try { builder.addDisallowedApplication(pkgLib.trim()); } catch (Throwable ignored) {}
+                                  }
+                              }
                           } else {
+                              // Modo individual: bloqueia apenas os aplicativos selecionados na listaAppsBloqueados
                               int adicionados = 0;
                               for (String pkg : copiaBloq) {
                                   if (pkg != null && !pkg.trim().isEmpty() && !pkg.equals(getPackageName())) {
@@ -1683,6 +1812,27 @@ jobs:
                   }
 
                   @JavascriptInterface
+                  public boolean temPermissaoGps24h() {
+                      return temPermissaoGpsSegundoPlanoStatic(context);
+                  }
+
+                  @JavascriptInterface
+                  public void solicitarPermissaoGps24h() {
+                      try {
+                          if (Build.VERSION.SDK_INT >= 29 && instanciaAtiva != null) {
+                              instanciaAtiva.requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQ_BG_LOCATION);
+                              return;
+                          }
+                      } catch (Throwable ignored) {}
+                      try {
+                          Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                          intent.setData(Uri.fromParts("package", context.getPackageName(), null));
+                          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          context.startActivity(intent);
+                      } catch (Throwable ignored) {}
+                  }
+
+                  @JavascriptInterface
                   public boolean temPermissaoVpn() {
                       try { return VpnService.prepare(context) == null; } catch (Throwable e) { return false; }
                   }
@@ -1698,17 +1848,25 @@ jobs:
                   }
 
                   @JavascriptInterface
-                  public void sincronizarFirewallVpn(boolean bloquearGeral, String pacotesJsonArray) {
+                  public void sincronizarFirewallVpn(boolean bloquearGeral, String pacotesBloqJsonArray, String pacotesLibJsonArray) {
                       try {
-                          JSONObject mapa = new JSONObject();
-                          if (pacotesJsonArray != null && !pacotesJsonArray.isEmpty()) {
-                              JSONArray arr = new JSONArray(pacotesJsonArray);
+                          JSONObject mapaBloq = new JSONObject();
+                          if (pacotesBloqJsonArray != null && !pacotesBloqJsonArray.isEmpty()) {
+                              JSONArray arr = new JSONArray(pacotesBloqJsonArray);
                               for (int i = 0; i < arr.length(); i++) {
                                   String pkg = arr.optString(i, "");
-                                  if (!pkg.isEmpty()) mapa.put(pkg, true);
+                                  if (!pkg.isEmpty()) mapaBloq.put(pkg, true);
                               }
                           }
-                          aplicarFirewallNativo(context, bloquearGeral, mapa);
+                          JSONObject mapaLib = new JSONObject();
+                          if (pacotesLibJsonArray != null && !pacotesLibJsonArray.isEmpty()) {
+                              JSONArray arrLib = new JSONArray(pacotesLibJsonArray);
+                              for (int i = 0; i < arrLib.length(); i++) {
+                                  String pkg = arrLib.optString(i, "");
+                                  if (!pkg.isEmpty()) mapaLib.put(pkg, true);
+                              }
+                          }
+                          aplicarFirewallNativo(context, bloquearGeral, mapaBloq, mapaLib);
                       } catch (Throwable ignored) {}
                   }
 
@@ -1748,7 +1906,10 @@ jobs:
                       JSONObject mapaBloq;
                       try { mapaBloq = new JSONObject(getPrefs(context).getString("appsBloqueados_v7", "{}")); }
                       catch (Throwable e) { mapaBloq = new JSONObject(); }
-                      return obterAppsInstaladosArrayStatic(context, diaRenovacao, fwGeral, mapaBloq).toString();
+                      JSONObject mapaLib;
+                      try { mapaLib = new JSONObject(getPrefs(context).getString("appsLiberados_v10", "{}")); }
+                      catch (Throwable e) { mapaLib = new JSONObject(); }
+                      return obterAppsInstaladosArrayStatic(context, diaRenovacao, fwGeral, mapaBloq, mapaLib).toString();
                   }
 
                   @JavascriptInterface
@@ -1783,7 +1944,7 @@ jobs:
           EOF
 
           # ===================================================================
-          # 3. INDEX.HTML COMPLETO (APP 1 - MONITOR: FIREBASE + GPS CONTINUO)
+          # 3. INDEX.HTML COMPLETO (APP 1 - MONITOR: SINCRONIZADO 24H)
           # ===================================================================
           cat << 'EOF' > app/src/main/assets/index.html
           <!DOCTYPE html>
@@ -1846,7 +2007,7 @@ jobs:
             <div class="header">
               <div>
                 <h1>📊 Monitor de Dados</h1>
-                <div class="header-sub" id="statusNuvemTopo">🔥 Firebase 24h Ativo...</div>
+                <div class="header-sub" id="statusNuvemTopo">🟢 Sincronizado 24h</div>
               </div>
               <span id="badgeRedeTopo" class="badge-rede">🟢 4G/5G Ativo</span>
             </div>
@@ -1858,9 +2019,10 @@ jobs:
 
             <div id="boxPermissao" class="card" style="display:none; border-color: var(--warning);">
               <div class="card-title" style="color: var(--warning);">⚠️ Permissoes do Sistema</div>
-              <p class="sub-info" style="margin-bottom: 8px;">Ative o Acesso ao Uso e a Chave de Firewall para sincronizacao completa.</p>
+              <p class="sub-info" style="margin-bottom: 8px;">Ative as permissoes abaixo para sincronizacao 24h mesmo apos reiniciar o aparelho.</p>
               <button id="btnPermUso" class="btn-warn" onclick="abrirPermissaoUso()">1. Liberar Acesso ao Uso no Android</button>
               <button id="btnPermVpn" class="btn-sec" onclick="abrirPermissaoVpn()" style="margin-top:6px;">2. Autorizar Chave de Firewall (VPN)</button>
+              <button id="btnPermGps24h" class="btn-warn" onclick="abrirPermissaoGps24h()" style="margin-top:6px;">3. Permitir Localizacao "O Tempo Todo"</button>
             </div>
 
             <div id="alertaFranquia" class="alerta-box"></div>
@@ -1932,8 +2094,6 @@ jobs:
             </div>
 
             <script>
-              var FIREBASE_URL = 'https://painel-2d29e-default-rtdb.firebaseio.com';
-
               var memoriaSegura = {};
               function temPonteAndroid() { return typeof window.AndroidMonitor !== 'undefined'; }
 
@@ -1969,7 +2129,9 @@ jobs:
               var offsetZeroGB = parseFloat(lerDado('offsetZeroGB', '0')) || 0;
               var firewallGeralAtivo = lerDado('firewallGeral_v7', 'false') === 'true';
               var appsBloqueadosMap = {};
+              var appsLiberadosMap = {};
               try { appsBloqueadosMap = JSON.parse(lerDado('appsBloqueados_v7', '{}')) || {}; } catch (e) { appsBloqueadosMap = {}; }
+              try { appsLiberadosMap = JSON.parse(lerDado('appsLiberados_v10', '{}')) || {}; } catch (e) { appsLiberadosMap = {}; }
 
               var ultimoConsumoBrutoGB = 0;
               var filtroAtualApps = 'todos';
@@ -1995,7 +2157,7 @@ jobs:
               }
 
               var nomeAparelho = detectarModeloAparelho();
-              document.getElementById('statusNuvemTopo').textContent = '🔥 Firebase 24h • ' + nomeAparelho;
+              document.getElementById('statusNuvemTopo').textContent = '🟢 Sincronizado 24h • ' + nomeAparelho;
 
               window.recarregarMemoriaNativa = function() {
                 nomeAparelho = lerDado('nomeAparelho_v6', nomeAparelho);
@@ -2004,7 +2166,8 @@ jobs:
                 offsetZeroGB = parseFloat(lerDado('offsetZeroGB', '0')) || 0;
                 firewallGeralAtivo = lerDado('firewallGeral_v7', 'false') === 'true';
                 try { appsBloqueadosMap = JSON.parse(lerDado('appsBloqueados_v7', '{}')) || {}; } catch (e) { appsBloqueadosMap = {}; }
-                document.getElementById('statusNuvemTopo').textContent = '🔥 Firebase 24h • ' + nomeAparelho;
+                try { appsLiberadosMap = JSON.parse(lerDado('appsLiberados_v10', '{}')) || {}; } catch (e) { appsLiberadosMap = {}; }
+                document.getElementById('statusNuvemTopo').textContent = '🟢 Sincronizado 24h • ' + nomeAparelho;
                 destacarBotoesPlanoLocal();
                 atualizarInterfaceFirewall();
                 carregarAppsInstalados();
@@ -2024,9 +2187,12 @@ jobs:
 
               function abrirPermissaoUso() { if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoUso) { window.AndroidMonitor.solicitarPermissaoUso(); } }
               function abrirPermissaoVpn() { if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoVpn) { window.AndroidMonitor.solicitarPermissaoVpn(); } }
+              function abrirPermissaoGps24h() { if (temPonteAndroid() && window.AndroidMonitor.solicitarPermissaoGps24h) { window.AndroidMonitor.solicitarPermissaoGps24h(); } }
 
               function appEstaBloqueado(pacote) {
-                if (firewallGeralAtivo) return true;
+                if (firewallGeralAtivo) {
+                  return !Boolean(appsLiberadosMap[pacote]);
+                }
                 return Boolean(appsBloqueadosMap[pacote]);
               }
 
@@ -2035,14 +2201,25 @@ jobs:
                 var txtBanner = document.getElementById('textoBannerFirewall');
                 var badgeTopo = document.getElementById('badgeRedeTopo');
                 var pacotesBloq = Object.keys(appsBloqueadosMap).filter(function(k) { return appsBloqueadosMap[k]; });
+                var pacotesLib = Object.keys(appsLiberadosMap).filter(function(k) { return appsLiberadosMap[k]; });
 
                 if (temPonteAndroid() && window.AndroidMonitor.sincronizarFirewallVpn) {
-                  try { window.AndroidMonitor.sincronizarFirewallVpn(firewallGeralAtivo, JSON.stringify(pacotesBloq)); } catch (e) {}
+                  try {
+                    window.AndroidMonitor.sincronizarFirewallVpn(
+                      firewallGeralAtivo,
+                      JSON.stringify(pacotesBloq),
+                      JSON.stringify(pacotesLib)
+                    );
+                  } catch (e) {}
                 }
 
                 if (firewallGeralAtivo) {
                   banner.style.display = 'block';
-                  txtBanner.textContent = 'Todos os aplicativos deste aparelho estao com acesso a internet bloqueado pela Central.';
+                  if (pacotesLib.length > 0) {
+                    txtBanner.textContent = 'Bloqueio geral ativo (' + pacotesLib.length + ' aplicativo(s) liberado(s) pela Central).';
+                  } else {
+                    txtBanner.textContent = 'Todos os aplicativos deste aparelho estao com acesso a internet bloqueado pela Central.';
+                  }
                   badgeTopo.textContent = '🛡️ Apps Bloqueados';
                   badgeTopo.classList.add('off');
                 } else if (pacotesBloq.length > 0) {
@@ -2063,9 +2240,11 @@ jobs:
                   try {
                     var permitidoUso = window.AndroidMonitor.temPermissaoUso();
                     var permitidoVpn = window.AndroidMonitor.temPermissaoVpn ? window.AndroidMonitor.temPermissaoVpn() : true;
-                    document.getElementById('boxPermissao').style.display = (permitidoUso && permitidoVpn) ? 'none' : 'block';
+                    var permitidoGps24h = window.AndroidMonitor.temPermissaoGps24h ? window.AndroidMonitor.temPermissaoGps24h() : true;
+                    document.getElementById('boxPermissao').style.display = (permitidoUso && permitidoVpn && permitidoGps24h) ? 'none' : 'block';
                     document.getElementById('btnPermUso').style.display = permitidoUso ? 'none' : 'block';
                     document.getElementById('btnPermVpn').style.display = permitidoVpn ? 'none' : 'block';
+                    document.getElementById('btnPermGps24h').style.display = permitidoGps24h ? 'none' : 'block';
 
                     ultimoConsumoBrutoGB = window.AndroidMonitor.obterConsumoTotalMesGB(diaCiclo) || 0;
                     estadoLocal.rede = window.AndroidMonitor.obterTipoRede() || 'Dados Moveis';
@@ -2079,12 +2258,14 @@ jobs:
                 }
 
                 var consumoLiquido = Math.max(0, ultimoConsumoBrutoGB - offsetZeroGB);
-                var velMostrada = firewallGeralAtivo ? 0 : Number(estadoLocal.velocidade);
+                var qtdLib = Object.keys(appsLiberadosMap).filter(function(k) { return appsLiberadosMap[k]; }).length;
+                var bloqueioTotalSemExcecao = firewallGeralAtivo && qtdLib === 0;
+                var velMostrada = bloqueioTotalSemExcecao ? 0 : Number(estadoLocal.velocidade);
 
                 if (!firewallGeralAtivo) { document.getElementById('badgeRedeTopo').textContent = '🟢 ' + estadoLocal.rede; }
                 document.getElementById('valorConsumoGB').textContent = consumoLiquido.toFixed(2) + ' GB';
                 document.getElementById('valVelocidade').textContent = velMostrada.toFixed(2) + ' Mbps';
-                document.getElementById('valLatencia').textContent = firewallGeralAtivo ? 'Bloqueado' : ((estadoLocal.latencia > 0 ? estadoLocal.latencia : 22) + ' ms');
+                document.getElementById('valLatencia').textContent = bloqueioTotalSemExcecao ? 'Bloqueado' : ((estadoLocal.latencia > 0 ? estadoLocal.latencia : 22) + ' ms');
 
                 var barra = document.getElementById('barraProgresso');
                 var alerta = document.getElementById('alertaFranquia');
@@ -2188,7 +2369,7 @@ jobs:
                 }).join('');
               }
 
-              function sincronizarFirebaseAgora() {
+              function sincronizarAgora() {
                 if (temPonteAndroid() && window.AndroidMonitor.forcarSincronizacaoNativa) {
                   try { window.AndroidMonitor.forcarSincronizacaoNativa(); } catch (e) {}
                 }
@@ -2206,7 +2387,7 @@ jobs:
               carregarAppsInstalados();
               iniciarGpsAltaPrecisaoWebView();
               atualizarInterfaceFirewall();
-              sincronizarFirebaseAgora();
+              sincronizarAgora();
               setInterval(atualizarPainelLocal, 3500);
               setInterval(carregarAppsInstalados, 10000);
             </script>
@@ -2215,7 +2396,7 @@ jobs:
           EOF
 
           # ===================================================================
-          # 4. CENTRAL.HTML COMPLETO (APP 2 - BOTAO ATUALIZAR GPS AGORA + BLOQUEIO APP)
+          # 4. CENTRAL.HTML COMPLETO (APP 2 - EXCECOES NO BLOQUEIO TOTAL + GPS)
           # ===================================================================
           cat << 'EOF' > app/src/main/assets/central.html
           <!DOCTYPE html>
@@ -2303,7 +2484,7 @@ jobs:
           <body>
             <div class="header">
               <h1>🖥️ Central de Monitoramento</h1>
-              <span id="statusCentral" class="badge-rede">🔥 Conectando Firebase...</span>
+              <span id="statusCentral" class="badge-rede">🟢 Sincronizando...</span>
             </div>
 
             <div class="grid-4">
@@ -2342,7 +2523,7 @@ jobs:
                 <button type="button" class="filtro-btn" id="ff-bloqueados" onclick="definirFiltroFrota('bloqueados')">🛡️ Bloqueados (0)</button>
               </div>
 
-              <div id="listaFrotaContainer"><div class="sub-info">Carregando aparelhos do Firebase...</div></div>
+              <div id="listaFrotaContainer"><div class="sub-info">Carregando aparelhos conectados...</div></div>
             </div>
 
             <div id="modalAparelhoRemoto" class="modal-overlay">
@@ -2418,7 +2599,7 @@ jobs:
                 <div class="filtros-apps">
                   <button class="filtro-btn ativo" id="mf-todos" onclick="filtrarAppsRemoto('todos')">Todos</button>
                   <button class="filtro-btn" id="mf-geo" onclick="filtrarAppsRemoto('geo')">📍 Com GPS</button>
-                  <button class="filtro-btn" id="mf-rede" onclick="filtrarAppsRemoto('rede')">🟢 Em Trafego</button>
+                  <button class="filtro-btn" id="mf-rede" onclick="filtrarAppsRemoto('rede')">🟢 Liberados / Ativos</button>
                   <button class="filtro-btn" id="mf-bloq" onclick="filtrarAppsRemoto('bloq')">🚫 Bloqueados</button>
                 </div>
                 <div class="app-list" id="modalListaApps"></div>
@@ -2489,6 +2670,22 @@ jobs:
                 return mapa;
               }
 
+              function obterMapaLiberadosExcecaoAparelho(d) {
+                if (!d) return {};
+                if (typeof d.appsLiberadosCsv === 'string') {
+                  return csvParaMapa(d.appsLiberadosCsv);
+                }
+                var mapa = {};
+                if (d.apps && d.apps.length > 0 && d.dadosDesligados) {
+                  for (var i = 0; i < d.apps.length; i++) {
+                    if (d.apps[i].liberadoExcecao || !d.apps[i].bloqueado) {
+                      mapa[d.apps[i].pacote] = true;
+                    }
+                  }
+                }
+                return mapa;
+              }
+
               function gravarComandoEConfigFirebase(deviceId, comandoObj, dadosAparelho, configPatch) {
                 try {
                   if (dadosAparelho) {
@@ -2547,7 +2744,6 @@ jobs:
                   timestamp: agoraTs
                 };
 
-                // Envia comando e configPatch sem bloquear a recepcao da resposta do aparelho
                 gravarComandoEConfigFirebase(id, comando, null, {
                   forcarGpsTimestamp: agoraTs,
                   updatedAt: agoraTs
@@ -2602,7 +2798,7 @@ jobs:
               function atualizarBadgeStatusCentral() {
                 var totalAparelhos = Object.keys(frotaAparelhos).length;
                 if (firebaseConectado) {
-                  document.getElementById('statusCentral').textContent = '🔥 Firebase Ao Vivo (' + totalAparelhos + ')';
+                  document.getElementById('statusCentral').textContent = '🟢 Sincronizado 24h (' + totalAparelhos + ')';
                 }
               }
 
@@ -2701,15 +2897,21 @@ jobs:
 
               function sincronizarEstadoAppsNoObjeto(d) {
                 if (!d) return;
-                var mapa = obterMapaBloqueadosAparelho(d);
-                d.appsBloqueadosCsv = mapaParaCsv(mapa);
+                var mapaBloq = obterMapaBloqueadosAparelho(d);
+                var mapaLib = obterMapaLiberadosExcecaoAparelho(d);
+                d.appsBloqueadosCsv = mapaParaCsv(mapaBloq);
+                d.appsLiberadosCsv = mapaParaCsv(mapaLib);
                 delete d.appsBloqueadosMap;
+
+                var bloqGeral = Boolean(d.dadosDesligados);
                 if (d.apps && d.apps.length > 0) {
                   for (var i = 0; i < d.apps.length; i++) {
                     var pkg = d.apps[i].pacote;
-                    var blqIndiv = Boolean(mapa[pkg]);
+                    var blqIndiv = Boolean(mapaBloq[pkg]);
+                    var libExc = Boolean(mapaLib[pkg]);
                     d.apps[i].bloqueadoIndividual = blqIndiv;
-                    d.apps[i].bloqueado = Boolean(d.dadosDesligados) || blqIndiv;
+                    d.apps[i].liberadoExcecao = libExc;
+                    d.apps[i].bloqueado = bloqGeral ? !libExc : blqIndiv;
                   }
                 }
               }
@@ -2735,7 +2937,6 @@ jobs:
                 frotaAparelhos[id] = payload;
                 salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
 
-                // Verifica se havia solicitacao de atualizacao de GPS pendente para este aparelho
                 if (pedidosGpsPendentes[id]) {
                   var pend = pedidosGpsPendentes[id];
                   var novoRefresh = Number(payload.ultimoGpsRefreshTs || 0);
@@ -2788,7 +2989,7 @@ jobs:
                 gravarComandoEConfigFirebase(d.deviceId, comando, d, { nome: novoNome, updatedAt: Date.now() });
 
                 var av = document.getElementById('statusNomeRemoto');
-                av.textContent = '✅ Renomeado no Firebase!';
+                av.textContent = '✅ Nome salvo!';
                 setTimeout(function() { av.textContent = ''; }, 2500);
               }
 
@@ -2811,7 +3012,7 @@ jobs:
                 salvarDado('aparelhosExcluidos_v8', JSON.stringify(aparelhosExcluidos));
                 salvarDado('frotaAparelhos_v10', JSON.stringify(frotaAparelhos));
                 renderizarFrota();
-                document.getElementById('statusCentral').textContent = removidos > 0 ? ('🧹 ' + removidos + ' off removido(s)') : '🔥 Firebase Ao Vivo (' + Object.keys(frotaAparelhos).length + ')';
+                document.getElementById('statusCentral').textContent = removidos > 0 ? ('🧹 ' + removidos + ' off removido(s)') : '🟢 Sincronizado 24h (' + Object.keys(frotaAparelhos).length + ')';
                 setTimeout(atualizarBadgeStatusCentral, 2500);
               }
 
@@ -2888,38 +3089,70 @@ jobs:
                 var d = frotaAparelhos[id];
                 if (!d) return;
                 var bloquearAgora = !Boolean(d.dadosDesligados);
-                var comando = { deviceId: id, acao: 'FIREWALL_GERAL', bloquear: bloquearAgora, timestamp: Date.now() };
+                var agoraTs = Date.now();
 
                 d.dadosDesligados = bloquearAgora;
+                d.appsLiberadosCsv = '';
+                if (!bloquearAgora) {
+                  d.appsBloqueadosCsv = '';
+                }
                 d.rede = bloquearAgora ? '🛡️ Apps Bloqueados' : '4G/5G Movel';
                 if (bloquearAgora) d.velocidade = 0;
 
+                var comando = {
+                  deviceId: id,
+                  acao: 'FIREWALL_GERAL',
+                  bloquear: bloquearAgora,
+                  appsBloqueadosCsv: d.appsBloqueadosCsv || '',
+                  appsLiberadosCsv: '',
+                  timestamp: agoraTs
+                };
+
                 sincronizarEstadoAppsNoObjeto(d);
                 registrarAparelhoNaTela(d, false);
-                gravarComandoEConfigFirebase(id, comando, d, { dadosDesligados: bloquearAgora, updatedAt: Date.now() });
+                gravarComandoEConfigFirebase(id, comando, d, {
+                  dadosDesligados: bloquearAgora,
+                  appsBloqueadosCsv: d.appsBloqueadosCsv || '',
+                  appsLiberadosCsv: '',
+                  updatedAt: agoraTs
+                });
               }
 
               function alternarBloqueioAppIndividual(id, pacoteApp) {
                 var d = frotaAparelhos[id];
                 if (!d || !pacoteApp) return;
 
-                if (Boolean(d.dadosDesligados)) {
-                  d.dadosDesligados = false;
-                  d.rede = '4G/5G Movel';
-                }
+                var bloqGeral = Boolean(d.dadosDesligados);
+                var mapaBloq = obterMapaBloqueadosAparelho(d);
+                var mapaLib = obterMapaLiberadosExcecaoAparelho(d);
+                var bloquearApp = true;
 
-                var mapa = obterMapaBloqueadosAparelho(d);
-                var estaBloqueadoAgora = Boolean(mapa[pacoteApp]);
-                var bloquearApp = !estaBloqueadoAgora;
-
-                if (bloquearApp) {
-                  mapa[pacoteApp] = true;
+                if (bloqGeral) {
+                  // Quando "Bloquear Todos" esta ativo: clicar em Liberar adiciona o app como excecao liberada e mantem todos os outros bloqueados!
+                  var jaEstavaLiberado = Boolean(mapaLib[pacoteApp]);
+                  if (jaEstavaLiberado) {
+                    delete mapaLib[pacoteApp];
+                    bloquearApp = true;
+                  } else {
+                    mapaLib[pacoteApp] = true;
+                    bloquearApp = false;
+                  }
                 } else {
-                  delete mapa[pacoteApp];
+                  // Modo normal: bloqueia ou libera apenas o app clicado
+                  var jaEstavaBloqueado = Boolean(mapaBloq[pacoteApp]);
+                  if (jaEstavaBloqueado) {
+                    delete mapaBloq[pacoteApp];
+                    bloquearApp = false;
+                  } else {
+                    mapaBloq[pacoteApp] = true;
+                    bloquearApp = true;
+                  }
                 }
 
-                var novoCsv = mapaParaCsv(mapa);
-                d.appsBloqueadosCsv = novoCsv;
+                var novoCsvBloq = mapaParaCsv(mapaBloq);
+                var novoCsvLib = mapaParaCsv(mapaLib);
+                d.appsBloqueadosCsv = novoCsvBloq;
+                d.appsLiberadosCsv = novoCsvLib;
                 sincronizarEstadoAppsNoObjeto(d);
 
                 var agoraTs = Date.now();
@@ -2928,20 +3161,23 @@ jobs:
                   acao: 'FIREWALL_APP',
                   pacote: pacoteApp,
                   bloquear: bloquearApp,
-                  appsBloqueadosCsv: novoCsv,
+                  dadosDesligados: bloqGeral,
+                  appsBloqueadosCsv: novoCsvBloq,
+                  appsLiberadosCsv: novoCsvLib,
                   timestamp: agoraTs
                 };
 
                 registrarAparelhoNaTela(d, false);
                 gravarComandoEConfigFirebase(id, comando, d, {
-                  dadosDesligados: Boolean(d.dadosDesligados),
-                  appsBloqueadosCsv: novoCsv,
+                  dadosDesligados: bloqGeral,
+                  appsBloqueadosCsv: novoCsvBloq,
+                  appsLiberadosCsv: novoCsvLib,
                   updatedAt: agoraTs
                 });
               }
 
               function reconectarTudo() {
-                document.getElementById('statusCentral').textContent = '🔄 Sincronizando Firebase...';
+                document.getElementById('statusCentral').textContent = '🔄 Sincronizando...';
                 carregarFrotaDoFirebase();
                 setTimeout(atualizarBadgeStatusCentral, 1200);
               }
@@ -2951,7 +3187,7 @@ jobs:
                 var idSim = 'CEL-' + Math.floor(Math.random() * 900 + 100);
                 var pacoteTeste = {
                   deviceId: idSim, nome: modelos[Math.floor(Math.random() * modelos.length)] + ' • ' + idSim, timestamp: Date.now(),
-                  consumoGB: 36.8, planoGB: 43, diaCiclo: 10, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosCsv: '', velocidade: 45.5, latencia: 18,
+                  consumoGB: 36.8, planoGB: 43, diaCiclo: 10, rede: '5G Ativo (Vivo)', dadosDesligados: false, appsBloqueadosCsv: '', appsLiberadosCsv: '', velocidade: 45.5, latencia: 18,
                   cidade: 'Jardim Iracema • Fortaleza - CE', endereco: 'Av. Major Assis, Jardim Iracema • Fortaleza - CE', operadora: 'Vivo', lat: -3.7248512, lon: -38.5819421,
                   apps: [
                     { nome: 'WhatsApp', pacote: 'com.whatsapp', totalMB: 1420.5, redeAtiva: 'Transmitindo', emTransmissao: true, usaGeo: true, geoAtiva: true, bloqueado: false },
@@ -3028,8 +3264,10 @@ jobs:
                   var bloqueado = Boolean(item.dadosDesligados);
                   var ehCritico = aparelhoEhCritico(item);
                   var mapaIndiv = obterMapaBloqueadosAparelho(item);
+                  var mapaLib = obterMapaLiberadosExcecaoAparelho(item);
                   var qtdBloqIndiv = Object.keys(mapaIndiv).length;
-                  var tempoTexto = bloqueado ? 'Apps Bloqueados' : (isOnline ? 'Online agora' : 'Offline');
+                  var qtdLibExc = Object.keys(mapaLib).length;
+                  var tempoTexto = bloqueado ? 'Bloqueio Geral' : (isOnline ? 'Online agora' : 'Offline');
 
                   var planoNum = Number(item.planoGB || 0);
                   var consumoNum = Number(item.consumoGB || 0);
@@ -3037,8 +3275,19 @@ jobs:
                   var corBarra = planoNum === 0 ? 'var(--primary)' : (pctUso >= 90 ? 'var(--danger)' : (pctUso >= 80 ? 'var(--warning)' : 'var(--success)'));
 
                   var txtPlanoCard = planoNum > 0 ? (planoNum + ' GB (' + pctUso.toFixed(0) + '%) • Dia ' + (item.diaCiclo || 1)) : ('Ilimitado • Dia ' + (item.diaCiclo || 1));
-                  var btnAppsHtml = bloqueado ? '<button class="btn-success" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🟢 Liberar Apps</button>' : '<button class="btn-danger" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🛡️ Bloquear Apps</button>';
-                  var tagAppsInfo = qtdBloqIndiv > 0 ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' app(s) bloq.</span>' : '<span class="tag tag-net-on">📦 Apps liberados</span>';
+                  var btnAppsHtml = bloqueado ? '<button class="btn-success" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🟢 Liberar Todos</button>' : '<button class="btn-danger" onclick="alternarFirewallGeralAparelho(\'' + item.deviceId + '\')">🛡️ Bloquear Todos</button>';
+
+                  var tagAppsInfo = '';
+                  if (bloqueado) {
+                    tagAppsInfo = qtdLibExc > 0
+                      ? '<span class="tag tag-net-on">🟢 ' + qtdLibExc + ' liberado(s) • Restante bloq.</span>'
+                      : '<span class="tag tag-net-block">🚫 Todos os apps bloqueados</span>';
+                  } else {
+                    tagAppsInfo = qtdBloqIndiv > 0
+                      ? '<span class="tag tag-net-block">🚫 ' + qtdBloqIndiv + ' app(s) bloq.</span>'
+                      : '<span class="tag tag-net-on">📦 Apps liberados</span>';
+                  }
+
                   var tagCriticoHtml = ehCritico ? ' <span class="tag tag-critico">🚨 ' + pctUso.toFixed(0) + '% usado</span>' : '';
                   var btnRemoverOffCard = !isOnline ? '<button class="filtro-btn" style="border-color:var(--danger); color:#f87171;" onclick="removerAparelhoPorId(\'' + item.deviceId + '\')">🗑️ Remover Off</button>' : '';
 
@@ -3115,22 +3364,26 @@ jobs:
               function renderizarListaAppsRemoto(listaBase, filtro, dadosAparelho) {
                 var container = document.getElementById('modalListaApps');
                 var mapaIndiv = obterMapaBloqueadosAparelho(dadosAparelho);
+                var mapaLib = obterMapaLiberadosExcecaoAparelho(dadosAparelho);
                 var bloqGeral = Boolean(dadosAparelho && dadosAparelho.dadosDesligados);
 
                 var filtrados = (listaBase || []).map(function(a) {
-                  var estaBloq = bloqGeral || Boolean(mapaIndiv[a.pacote]);
+                  var libExcecao = Boolean(mapaLib[a.pacote]);
+                  var blqIndiv = Boolean(mapaIndiv[a.pacote]);
+                  var estaBloq = bloqGeral ? !libExcecao : blqIndiv;
                   return {
                     nome: a.nome,
                     pacote: a.pacote,
                     totalMB: a.totalMB,
                     usaGeo: a.usaGeo,
                     emTransmissao: !estaBloq && a.emTransmissao,
-                    bloqueado: estaBloq
+                    bloqueado: estaBloq,
+                    liberadoExcecao: bloqGeral && libExcecao
                   };
                 });
 
                 if (filtro === 'geo') { filtrados = filtrados.filter(function(a) { return a.usaGeo; }); }
-                else if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado && a.emTransmissao; }); }
+                else if (filtro === 'rede') { filtrados = filtrados.filter(function(a) { return !a.bloqueado; }); }
                 else if (filtro === 'bloq') { filtrados = filtrados.filter(function(a) { return a.bloqueado; }); }
 
                 document.getElementById('modalContadorApps').textContent = filtrados.length + ' apps';
@@ -3139,12 +3392,19 @@ jobs:
                 var devId = dadosAparelho ? dadosAparelho.deviceId : '';
                 container.innerHTML = filtrados.map(function(app) {
                   var estaBloq = Boolean(app.bloqueado);
+                  var badgeStatus = estaBloq
+                    ? '<span class="tag tag-net-block">🚫 Bloqueado</span>'
+                    : (app.liberadoExcecao
+                        ? '<span class="tag tag-net-on">🟢 Liberado (Exceção)</span>'
+                        : '<span class="tag tag-net-on">🟢 Liberado</span>');
+
                   var btnAppHtml = estaBloq
                     ? '<button class="btn-success btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🟢 Liberar</button>'
                     : '<button class="btn-danger btn-app-lock" onclick="alternarBloqueioAppIndividual(\'' + devId + '\', \'' + app.pacote + '\')">🚫 Bloquear</button>';
+
                   return '<div class="app-item ' + (estaBloq ? 'app-bloqueado' : '') + '">' +
                     '<div class="app-main"><div class="app-nome">' + app.nome + '</div><div class="app-pkg">' + app.pacote + '</div>' +
-                    '<div class="app-badges">' + (estaBloq ? '<span class="tag tag-net-block">🚫 Bloqueado</span>' : '<span class="tag tag-net-on">🟢 Liberado</span>') + '</div></div>' +
+                    '<div class="app-badges">' + badgeStatus + '</div></div>' +
                     '<div class="app-right"><div class="app-consumo">' + app.totalMB + ' MB</div>' + btnAppHtml + '</div></div>';
                 }).join('');
               }
@@ -3201,8 +3461,8 @@ jobs:
                   applicationId "com.example.monitordados"
                   minSdk 23
                   targetSdk 33
-                  versionCode 15
-                  versionName "10.3"
+                  versionCode 16
+                  versionName "10.4"
               }
               buildTypes {
                   debug {
